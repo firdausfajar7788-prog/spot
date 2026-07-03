@@ -1,1 +1,9 @@
-asdasdasdasdasdad
+streamlit
+pandas
+numpy
+plotly
+requests
+streamlit-autorefresh
+yfinance
+gspread
+oauth2client
