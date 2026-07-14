@@ -137,13 +137,11 @@ def get_support_resistance(pair):
         return {"last": 0, "s1": 0, "s2": 0, "r1": 0, "r2": 0}
 
 # =========================================================
-# COINGECKO – AMBIL INDIKATOR
+# COINGECKO – AMBIL RSI & MACD SAJA (TANPA EMA)
 # =========================================================
 @st.cache_data(ttl=300)
 def get_coingecko_indicators(symbol):
-    """Ambil RSI, EMA, MACD dari CoinGecko"""
     try:
-        # Coba langsung dengan ID
         coin_id = symbol.lower()
         url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         params = {"vs_currency": "usd", "days": "30", "interval": "daily"}
@@ -167,7 +165,7 @@ def get_coingecko_indicators(symbol):
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
         
-        # === EMA 20 & 50 ===
+        # === MACD ===
         def ema(data, period):
             if len(data) < period:
                 return data[-1]
@@ -177,18 +175,13 @@ def get_coingecko_indicators(symbol):
                 ema_val = (price * multiplier) + (ema_val * (1 - multiplier))
             return ema_val
         
-        ema20 = ema(prices, 20)
-        ema50 = ema(prices, 50)
         macd_line = ema(prices, 12) - ema(prices, 26)
         signal_line = macd_line * 0.9
         macd_hist = macd_line - signal_line
         
         return {
             "rsi": float(rsi),
-            "ema20": float(ema20),
-            "ema50": float(ema50),
             "macd_hist": float(macd_hist),
-            "price": prices[-1]
         }
     except Exception as e:
         return None
@@ -207,7 +200,7 @@ def get_all_tickers():
         return {}
 
 # =========================================================
-# PROSES DATA
+# PROSES DATA – TANPA EMA
 # =========================================================
 def process_scanner_data(tickers, min_volume=0, prev_data=None):
     rows = []
@@ -227,22 +220,17 @@ def process_scanner_data(tickers, min_volume=0, prev_data=None):
             
             symbol = pair.replace("_idr", "").upper()
             
-            # Ambil indikator dari CoinGecko
+            # Ambil RSI & MACD dari CoinGecko
             indicators = get_coingecko_indicators(symbol)
-            
             if indicators:
                 rsi = indicators["rsi"]
-                ema20 = indicators["ema20"]
-                ema50 = indicators["ema50"]
                 macd_hist = indicators["macd_hist"]
             else:
                 # Fallback
                 rsi = 50 + ((last - low) / (high - low) * 20 - 10)
-                ema20 = last * 0.98
-                ema50 = last * 0.95
-                macd_hist = last - ema20
+                macd_hist = 0
             
-            # POSISI HARGA
+            # POSISI HARGA (0-100%)
             position = ((last - low) / (high - low)) * 100 if high > low else 50
             
             # RSI STATUS
@@ -253,60 +241,60 @@ def process_scanner_data(tickers, min_volume=0, prev_data=None):
             else:
                 rsi_status = "🟡 Neutral"
             
-            # TREND
-            if last > ema20 > ema50:
+            # === TREND BERDASARKAN POSISI ===
+            if position > 70:
                 trend = "🟢 BULLISH"
-            elif last < ema20 < ema50:
+            elif position < 30:
                 trend = "🔴 BEARISH"
             else:
                 trend = "🟡 SIDEWAYS"
             
-            # MACD STATUS
-            macd_status = "🟢 Bullish" if macd_hist > 0 else "🔴 Bearish"
+            # === MACD STATUS ===
+            macd_status = "🟢 Bullish" if macd_hist > 0 else "🔴 Bearish" if macd_hist < 0 else "🟡 Neutral"
             
-            # SKOR
+            # === SKOR ===
             score = 0
             reasons = []
             
+            # 1. Posisi harga (bobot 25)
             if position > 70:
-                score += 15
-                reasons.append("Posisi > 70%")
+                score += 25
+                reasons.append(f"Posisi {position:.0f}%")
             elif position < 30:
-                score -= 15
-                reasons.append("Posisi < 30%")
+                score -= 25
+                reasons.append(f"Posisi {position:.0f}%")
             
+            # 2. RSI (bobot 25)
             if rsi < 30:
-                score += 20
+                score += 25
                 reasons.append("RSI Oversold")
             elif rsi > 70:
-                score -= 20
+                score -= 25
                 reasons.append("RSI Overbought")
-            
-            if "BULLISH" in trend:
-                score += 20
-                reasons.append("Trend Bullish")
-            elif "BEARISH" in trend:
-                score -= 20
-                reasons.append("Trend Bearish")
-            
-            if macd_hist > 0:
+            elif rsi < 50:
                 score += 10
-                reasons.append("MACD Bullish")
-            else:
-                score -= 10
-                reasons.append("MACD Bearish")
+                reasons.append("RSI < 50")
             
+            # 3. Volume (bobot 20)
             prev = prev_data.get(pair, {})
             prev_vol = prev.get('volume', vol_idr)
             vol_ratio = vol_idr / prev_vol if prev_vol > 0 else 1
             if vol_ratio > 1.3:
-                score += 10
+                score += 15
                 reasons.append("Volume naik")
             elif vol_ratio < 0.7:
-                score -= 10
+                score -= 15
                 reasons.append("Volume turun")
             
-            # SIGNAL
+            # 4. MACD (bobot 10)
+            if macd_hist > 0:
+                score += 10
+                reasons.append("MACD Bullish")
+            elif macd_hist < 0:
+                score -= 10
+                reasons.append("MACD Bearish")
+            
+            # === SIGNAL ===
             if score >= 50:
                 signal = "🟢 STRONG BUY"
                 signal_class = "signal-strong-buy"
@@ -323,7 +311,7 @@ def process_scanner_data(tickers, min_volume=0, prev_data=None):
                 signal = "🟡 HOLD"
                 signal_class = "signal-hold"
             
-            # PANAH
+            # === PANAH ===
             prev_last = prev.get('last', last)
             price_arrow = "⬆️" if last > prev_last else "⬇️" if last < prev_last else "➡️"
             vol_arrow = "⬆️" if vol_idr > prev_vol * 1.02 else "⬇️" if vol_idr < prev_vol * 0.98 else "➡️"
@@ -374,12 +362,16 @@ with st.sidebar:
         st.rerun()
     
     st.divider()
-    st.caption("📊 **Sumber:** Indodax + CoinGecko")
+    st.caption("📊 **Indikator:**")
+    st.caption("• Posisi Harga (High/Low)")
+    st.caption("• RSI (CoinGecko)")
+    st.caption("• Volume vs Rata-rata")
+    st.caption("• MACD (CoinGecko)")
 
 # =========================================================
 # MAIN
 # =========================================================
-st.title("🇮🇩 Indodax + CoinGecko Hybrid")
+st.title("🇮🇩 Indodax + CoinGecko (Fixed)")
 st.caption(f"🕐 Update: {st.session_state.last_update.strftime('%Y-%m-%d %H:%M:%S')}")
 
 tickers = get_all_tickers()
@@ -406,10 +398,8 @@ if not df.empty:
     c4.metric("🟢 Buy", len(df[df["Signal"] == "🟢 BUY"]))
     c5.metric("🔴 Sell", len(df[df["Signal"].str.contains("SELL")]))
     
-    # TABEL – TANPA column_config (pakai format manual)
+    # TABEL
     st.subheader("📊 Market Scanner")
-    
-    # Format angka manual sebelum ditampilkan
     display_df = df.copy()
     display_df["Last"] = display_df["Last"].apply(lambda x: f"{x:,.0f}")
     display_df["Volume"] = display_df["Volume"].apply(lambda x: f"{x:,.0f}")
@@ -419,7 +409,6 @@ if not df.empty:
     display_df["RSI"] = display_df["RSI"].apply(lambda x: f"{x:.1f}")
     display_df["Score"] = display_df["Score"].apply(lambda x: f"{x:.0f}")
     
-    # Pilih kolom yang ditampilkan
     cols_to_show = [
         "Pair", "Base", "Last", "Volume", "Position %", 
         "RSI", "RSI Status", "Trend", "MACD", "Score", 
