@@ -885,6 +885,17 @@ with tab1:
                     entry = price
                     sl = entry - atr * 3
                     tp = entry + atr * 7
+
+                    # Simpan ke positions (untuk tracking exit)
+                    if symbol not in st.session_state.positions:
+                        st.session_state.positions[symbol] = {
+                            "entry": entry,
+                            "sl": sl,
+                            "tp": tp,
+                            "entry_time": datetime.now(),
+                            "highest_price": entry
+                        }
+                        st.success(f"✅ Position opened for {symbol} at ${entry:.2f}")
                     
                     if symbol not in st.session_state.pending_signal:
                         st.session_state.pending_signal[symbol] = {
