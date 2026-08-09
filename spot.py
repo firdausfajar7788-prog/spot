@@ -847,7 +847,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 
 # ==================== TAB 1: SCANNER ====================
  
-# ==================== TAB 1: SCANNER ====================
+ 
 with tab1:
     st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
     
