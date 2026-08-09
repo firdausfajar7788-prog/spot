@@ -1049,8 +1049,7 @@ with tab1:
                     entry = price
                     sl = entry - atr * 3
                     tp = entry + atr * 7
-                    position_size = 1  # Atau sesuai setting
-            
+
                     if symbol not in st.session_state.pending_signal:
                         st.session_state.pending_signal[symbol] = {
                             "signal": result["main_signal"],
@@ -1061,32 +1060,31 @@ with tab1:
                             "timeframe": "5m"
                         }
                         
-                        # 🔥 SIMPAN KE DATABASE
-                        saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
-                        if saved_pos:
+                        if symbol not in st.session_state.positions:
                             st.session_state.positions[symbol] = {
                                 "entry": entry,
                                 "sl": sl,
                                 "tp": tp,
                                 "entry_time": datetime.now(),
-                                "highest_price": entry,
-                                "id": saved_pos["id"]
+                                "highest_price": entry
                             }
                             st.success(f"✅ Position opened for {symbol} at ${entry:.2f}")
                         
                         sent = send_telegram_once(symbol, result["main_signal"], result)
                         if sent:
-                            save_signal({
+                            signal_save_data = {
                                 'symbol': symbol,
                                 'signal': result["main_signal"],
                                 'entry_price': entry,
                                 'stop_loss': sl,
                                 'take_profit': tp,
                                 'timestamp': datetime.now().isoformat()
-                            })
-                            stats = get_performance()
-                            stats['total_signals'] = stats.get('total_signals', 0) + 1
-                            update_performance(stats)
+                            }
+                            
+                            if save_signal(signal_save_data):
+                                stats = get_performance()
+                                stats['total_signals'] = stats.get('total_signals', 0) + 1
+                                update_performance(stats)
             
             # Simpan sinyal EXIT
             elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
@@ -1460,4 +1458,4 @@ st.caption(f"""
 💾 Database: Supabase PostgreSQL  
 📌 Mode: SPOT (BUY & EXIT Only)
 """)
-gini
+kaya gini
