@@ -847,7 +847,7 @@ with tab1:
     for sym in expired:
         del st.session_state.pending_signal[sym]
 
-    for idx, symbol in enumerate(st.session_state.watchlist[:20]):
+    for idx, symbol in enumerate(st.session_state.watchlist[:50]):
         progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:20]))
         status_text.text(f"🔄 Scanning {symbol}...")
         
