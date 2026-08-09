@@ -716,9 +716,6 @@ def create_chart(df, symbol, timeframe):
     fig.update_yaxes(gridcolor="rgba(255,255,255,0.03)")
     return fig
 
-# =========================================================
-# CHECK EXIT CONDITIONS - SPOT
-# =========================================================
 def check_exit_conditions(position, df, highest_price=None):
     """Cek kondisi exit untuk posisi yang sudah masuk (Spot)"""
     if df is None or len(df) < 10:
@@ -750,10 +747,22 @@ def check_exit_conditions(position, df, highest_price=None):
             return "🔄 REVERSAL EXIT", price
     
     # 5. Time-based exit (7 hari)
-    if position.get("entry_time"):
-        holding_days = (datetime.now() - position["entry_time"]).days
-        if holding_days > 7:
-            return "⏰ TIME EXIT (7 days)", price
+    entry_time = position.get("entry_time")
+    if entry_time:
+        # Pastikan entry_time adalah datetime
+        if isinstance(entry_time, str):
+            try:
+                entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+            except:
+                try:
+                    entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                except:
+                    entry_time = None
+        
+        if entry_time and isinstance(entry_time, datetime):
+            holding_days = (datetime.now() - entry_time).days
+            if holding_days > 7:
+                return "⏰ TIME EXIT (7 days)", price
     
     return None, price
 
@@ -1079,29 +1088,105 @@ with tab2:
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
+    # ========== UPDATE POSISI ==========
+    updated_positions = {}
+    positions_to_remove = []
+    
+    for symbol, pos in st.session_state.positions.items():
+        try:
+            # Ambil data terbaru
+            df = get_data_safe(symbol, "15m", min_candles=20)
+            if df is None or df.empty:
+                # Jika tidak ada data, tetap tampilkan posisi lama
+                updated_positions[symbol] = pos
+                continue
+            
+            current_price = df["Close"].iloc[-1]
+            
+            # Update highest price
+            highest = pos.get("highest_price", pos["entry"])
+            if current_price > highest:
+                highest = current_price
+            
+            # Siapkan position untuk check_exit_conditions
+            # PASTIKAN entry_time dalam format datetime
+            entry_time = pos.get("entry_time")
+            if isinstance(entry_time, str):
+                try:
+                    entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                except:
+                    try:
+                        entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                    except:
+                        entry_time = datetime.now()
+            elif entry_time is None:
+                entry_time = datetime.now()
+            
+            position_for_exit = {
+                "entry": pos["entry"],
+                "sl": pos.get("sl"),
+                "tp": pos.get("tp"),
+                "entry_time": entry_time
+            }
+            
+            # Cek kondisi exit
+            exit_signal, exit_price = check_exit_conditions(
+                position_for_exit, 
+                df, 
+                highest
+            )
+            
+            # Update posisi
+            pos["current_price"] = current_price
+            pos["highest_price"] = highest
+            
+            # Auto exit jika ada sinyal
+            if exit_signal:
+                save_signal({
+                    'symbol': symbol,
+                    'signal': f"EXIT - {exit_signal}",
+                    'exit_price': exit_price,
+                    'profit_pct': (exit_price/pos['entry'] - 1) * 100,
+                    'timestamp': datetime.now().isoformat()
+                })
+                positions_to_remove.append(symbol)
+                st.success(f"✅ {symbol} closed: {exit_signal} at ${exit_price:.4f}")
+            else:
+                updated_positions[symbol] = pos
+                
+        except Exception as e:
+            # Jika error, tetap pertahankan posisi
+            updated_positions[symbol] = pos
+            print(f"Error updating {symbol}: {e}")
+    
+    # Hapus posisi yang sudah exit
+    for symbol in positions_to_remove:
+        if symbol in st.session_state.positions:
+            del st.session_state.positions[symbol]
+    
+    # Update session state
+    st.session_state.positions = updated_positions
+    
+    # ========== TAMPILKAN OPEN POSITIONS ==========
     if st.session_state.positions:
         pos_data = []
         for symbol, pos in st.session_state.positions.items():
-            # Cek kondisi exit
-            df = get_data_safe(symbol, "15m", min_candles=20)
-            if df is not None:
-                exit_signal, exit_price = check_exit_conditions(pos, df, pos.get("highest_price"))
-                
-                # Update highest price
-                current_price = df["Close"].iloc[-1]
-                if current_price > pos.get("highest_price", 0):
-                    pos["highest_price"] = current_price
-                
-                # Hitung PNL
+            try:
+                current_price = pos.get("current_price", pos["entry"])
                 pnl_percent = (current_price / pos['entry'] - 1) * 100
                 
-                # Warna PNL (hijau jika profit, merah jika loss)
                 if pnl_percent > 0:
                     pnl_color = "🟢"
                 elif pnl_percent < 0:
                     pnl_color = "🔴"
                 else:
                     pnl_color = "🟡"
+                
+                entry_time = pos.get("entry_time")
+                if isinstance(entry_time, datetime):
+                    entry_time_str = entry_time.strftime("%Y-%m-%d %H:%M")
+                else:
+                    entry_time_str = str(entry_time)[:16] if entry_time else ""
                 
                 pos_data.append({
                     "Coin": symbol,
@@ -1110,21 +1195,10 @@ with tab3:
                     "SL": format_price(pos.get("sl")),
                     "TP": format_price(pos.get("tp")),
                     "PNL": f"{pnl_color} {pnl_percent:.2f}%",
-                    "Exit Signal": exit_signal if exit_signal else "🟡 HOLD",
-                    "Entry Time": pos.get("entry_time", "").strftime("%Y-%m-%d %H:%M")
+                    "Entry Time": entry_time_str
                 })
-                
-                # Auto exit jika ada sinyal
-                if exit_signal:
-                    save_signal({
-                        'symbol': symbol,
-                        'signal': f"EXIT - {exit_signal}",
-                        'exit_price': exit_price,
-                        'profit_pct': (exit_price/pos['entry'] - 1) * 100,
-                        'timestamp': datetime.now().isoformat()
-                    })
-                    del st.session_state.positions[symbol]
-                    st.rerun()
+            except Exception as e:
+                continue
         
         if pos_data:
             df_pos = pd.DataFrame(pos_data)
@@ -1141,9 +1215,9 @@ with tab3:
             
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Positions", total_positions)
-            col2.metric("Winning", winning_positions, delta=f"+{winning_positions}" if winning_positions > 0 else "0")
-            col3.metric("Losing", losing_positions, delta=f"-{losing_positions}" if losing_positions > 0 else "0")
-            col4.metric("Total PNL", f"{total_profit:.2f}%", delta=f"{total_profit:.2f}%" if total_profit != 0 else "0%")
+            col2.metric("Winning", winning_positions)
+            col3.metric("Losing", losing_positions)
+            col4.metric("Total PNL", f"{total_profit:.2f}%")
     else:
         st.info("📭 Tidak ada posisi terbuka")
     
@@ -1157,7 +1231,6 @@ with tab3:
         if 'id' in df_closed.columns:
             df_closed = df_closed.drop('id', axis=1)
         
-        # Tambahkan PNL color
         if 'profit_pct' in df_closed.columns:
             df_closed['PNL'] = df_closed['profit_pct'].apply(
                 lambda x: f"🟢 {x:.2f}%" if x > 0 else f"🔴 {x:.2f}%" if x < 0 else f"🟡 {x:.2f}%"
@@ -1165,7 +1238,6 @@ with tab3:
         
         st.dataframe(df_closed, use_container_width=True, hide_index=True)
         
-        # ========== CLOSED POSITIONS SUMMARY ==========
         if 'profit_pct' in df_closed.columns:
             total_closed = len(df_closed)
             total_profit_closed = df_closed['profit_pct'].sum()
