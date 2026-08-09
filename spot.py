@@ -668,29 +668,38 @@ def save_position_to_db(symbol, entry, sl, tp, position_size=0):
     """Simpan posisi baru ke database"""
     supabase = get_supabase()
     try:
+        # Pastikan semua nilai adalah float
         data = {
-            "symbol": symbol,
-            "entry_price": entry,
-            "current_price": entry,
-            "stop_loss": sl,
-            "take_profit": tp,
-            "highest_price": entry,
-            "position_size": position_size,
+            "symbol": str(symbol),
+            "entry_price": float(entry),
+            "current_price": float(entry),
+            "stop_loss": float(sl),
+            "take_profit": float(tp),
+            "highest_price": float(entry),
+            "position_size": float(position_size),
             "entry_time": datetime.now().isoformat(),
             "status": "OPEN",
-            "pnl": 0,
-            "pnl_percent": 0
+            "pnl": 0.0,
+            "pnl_percent": 0.0
         }
+        
+        # DEBUG: Tampilkan data di Streamlit
+        st.write(f"🔍 Saving: {data}")
+        
         result = supabase.table("positions").insert(data).execute()
-        # CEK APAKAH BERHASIL
+        
+        # DEBUG: Tampilkan hasil
+        st.write(f"✅ Result: {result}")
+        
         if result.data and len(result.data) > 0:
-            print(f"✅ Position saved: {result.data[0]}")
             return result.data[0]
         else:
-            print("❌ No data returned from insert")
+            st.error("❌ No data returned from insert")
             return None
     except Exception as e:
-        print(f"❌ Error save position: {e}")
+        # TAMPILKAN ERROR LENGKAP
+        st.error(f"❌ Database error: {str(e)}")
+        st.error(f"❌ Error type: {type(e).__name__}")
         return None
 
 def get_open_positions_from_db():
@@ -1050,19 +1059,18 @@ with tab1:
                     if pd.isna(atr) or atr == 0:
                         atr = price * 0.01
                     
-                    entry = price
-                    sl = entry - atr * 3
-                    tp = entry + atr * 7
-                    position_size = 1
+                    entry = float(price)
+                    sl = float(entry - atr * 3)
+                    tp = float(entry + atr * 7)
+                    position_size = 1.0
                     
-                    # ========== CEK POSISI DI DATABASE ==========
-                    # Cek apakah sudah ada posisi OPEN di database untuk coin ini
+                    # CEK POSISI DI DATABASE
                     existing_positions = get_open_positions_from_db()
                     existing_symbols = [p["symbol"] for p in existing_positions]
                     
-                    # ========== CEK PENDING SIGNAL ==========
+                    # CEK PENDING
                     if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
-                        # 1. SIMPAN KE PENDING
+                        # SIMPAN KE PENDING DULU
                         st.session_state.pending_signal[symbol] = {
                             "signal": result["main_signal"],
                             "time": datetime.now(),
@@ -1072,8 +1080,10 @@ with tab1:
                             "timeframe": "5m"
                         }
                         
-                        # 2. SIMPAN KE DATABASE
+                        # SIMPAN KE DATABASE
+                        st.info(f"📝 Trying to save {symbol} to database...")
                         saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
+                        
                         if saved_pos:
                             st.session_state.positions[symbol] = {
                                 "entry": entry,
@@ -1086,7 +1096,7 @@ with tab1:
                             }
                             st.success(f"✅ Position opened for {symbol} at ${entry:.2f}")
                             
-                            # 3. KIRIM TELEGRAM
+                            # Kirim telegram
                             sent = send_telegram_once(symbol, result["main_signal"], result)
                             if sent:
                                 save_signal({
@@ -1101,11 +1111,11 @@ with tab1:
                                 stats['total_signals'] = stats.get('total_signals', 0) + 1
                                 update_performance(stats)
                         else:
-                            # Jika gagal simpan ke database, hapus dari pending
-                            del st.session_state.pending_signal[symbol]
+                            # HAPUS PENDING JIKA GAGAL
+                            if symbol in st.session_state.pending_signal:
+                                del st.session_state.pending_signal[symbol]
                             st.error(f"❌ Gagal membuka posisi untuk {symbol}")
                     else:
-                        # Sudah ada posisi atau pending
                         if symbol in existing_symbols:
                             st.warning(f"⚠️ {symbol} already has an open position!")
                         elif symbol in st.session_state.pending_signal:
