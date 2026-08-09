@@ -1458,4 +1458,4 @@ st.caption(f"""
 💾 Database: Supabase PostgreSQL  
 📌 Mode: SPOT (BUY & EXIT Only)
 """)
-kaya gini
+ 
