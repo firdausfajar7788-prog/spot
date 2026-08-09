@@ -148,8 +148,24 @@ def remove_coin(symbol):
         return False
 
 def save_signal(data):
+    """Simpan sinyal dengan cegah duplikat"""
     supabase = get_supabase()
     try:
+        # Cek duplikat dalam 5 menit terakhir
+        symbol = data.get("symbol")
+        signal = data.get("signal")
+        
+        five_min_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
+        res = supabase.table("signal_history")\
+            .select("id")\
+            .eq("symbol", symbol)\
+            .eq("signal", signal)\
+            .gte("timestamp", five_min_ago)\
+            .execute()
+        
+        if res.data and len(res.data) > 0:
+            return False  # Duplikat, skip save
+        
         data["timestamp"] = datetime.now().isoformat()
         supabase.table("signal_history").insert(data).execute()
         return True
@@ -830,48 +846,15 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==================== TAB 1: SCANNER ====================
+# ==================== TAB 1: SCANNER ====================
 with tab1:
-    st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
-    
-    all_signals = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    # Hapus pending signal yang kadaluarsa
-    current_time = datetime.now()
-    expired = []
-    for symbol, data in st.session_state.pending_signal.items():
-        elapsed = (current_time - data["time"]).seconds / 60
-        if elapsed > hold_minutes:
-            expired.append(symbol)
-    for sym in expired:
-        del st.session_state.pending_signal[sym]
+    # ... kode di atas ...
 
     for idx, symbol in enumerate(st.session_state.watchlist[:50]):
-        progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:50]))
-        status_text.text(f"🔄 Scanning {symbol}...")
-        
-        result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
-        
+        # ... kode scan ...
+
         if result:
-            signal_data = {
-                "Coin": symbol,
-                "Signal": result["main_signal"],
-                "Strength": "⭐" * result.get("main_strength", 1),
-            }
-            
-            for tf in ["15m", "1h", "4h"]:
-                if tf in result["timeframes"]:
-                    res = result["timeframes"][tf]
-                    signal_data[f"{tf.upper()} Action"] = res["action"]
-                    signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
-                    signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
-                    signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
-                    signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
-                    signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
-                    signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
-            
-            all_signals.append(signal_data)
+            # ... kode signal_data ...
 
             # Simpan pending signal jika sinyal BUY kuat
             if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
@@ -886,18 +869,9 @@ with tab1:
                     sl = entry - atr * 3
                     tp = entry + atr * 7
 
-                    # Simpan ke positions (untuk tracking exit)
-                    if symbol not in st.session_state.positions:
-                        st.session_state.positions[symbol] = {
-                            "entry": entry,
-                            "sl": sl,
-                            "tp": tp,
-                            "entry_time": datetime.now(),
-                            "highest_price": entry
-                        }
-                        st.success(f"✅ Position opened for {symbol} at ${entry:.2f}")
-                    
+                    # ========== PERBAIKI: Cek pending dulu ==========
                     if symbol not in st.session_state.pending_signal:
+                        # Simpan ke pending
                         st.session_state.pending_signal[symbol] = {
                             "signal": result["main_signal"],
                             "time": datetime.now(),
@@ -907,20 +881,36 @@ with tab1:
                             "timeframe": "5m"
                         }
                         
+                        # Simpan ke positions (untuk tracking exit)
+                        if symbol not in st.session_state.positions:
+                            st.session_state.positions[symbol] = {
+                                "entry": entry,
+                                "sl": sl,
+                                "tp": tp,
+                                "entry_time": datetime.now(),
+                                "highest_price": entry
+                            }
+                            st.success(f"✅ Position opened for {symbol} at ${entry:.2f}")
+                        
+                        # Kirim telegram dan save ke database
                         sent = send_telegram_once(symbol, result["main_signal"], result)
                         if sent:
-                            save_signal({
+                            # Siapkan data lengkap untuk signal_history
+                            signal_save_data = {
                                 'symbol': symbol,
                                 'signal': result["main_signal"],
-                                'entry': entry,
-                                'sl': sl,
-                                'tp': tp,
+                                'entry_price': entry,
+                                'stop_loss': sl,
+                                'take_profit': tp,
                                 'timestamp': datetime.now().isoformat()
-                            })
-                            stats = get_performance()
-                            stats['total_signals'] = stats.get('total_signals', 0) + 1
-                            update_performance(stats)
-            
+                            }
+                            
+                            if save_signal(signal_save_data):
+                                stats = get_performance()
+                                stats['total_signals'] = stats.get('total_signals', 0) + 1
+                                update_performance(stats)
+            # ========== AKHIR PERBAIKAN ==========
+
             # Simpan sinyal EXIT
             elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
                 sent = send_telegram_once(symbol, result["main_signal"], result)
@@ -930,83 +920,6 @@ with tab1:
                         'signal': result["main_signal"],
                         'timestamp': datetime.now().isoformat()
                     })
-
-    progress_bar.empty()
-    status_text.empty()
-
-    if all_signals:
-        df_signals = pd.DataFrame(all_signals)
-        st.dataframe(df_signals, use_container_width=True, hide_index=True)
-        
-        buy_signals = [s for s in all_signals if "BUY" in s["Signal"]]
-        if buy_signals:
-            best = buy_signals[0]
-            st.success(f"🏆 Best Buy Signal: **{best['Coin']}** | {best['Signal']}")
-    else:
-        st.info("ℹ️ Tidak ada data")
-
-    # ========== TAMPILAN PENDING SIGNALS ==========
-    if st.session_state.pending_signal:
-        st.divider()
-        st.subheader("⏳ Pending Signals - Entry, TP, SL")
-        st.caption("Sinyal BUY yang masih aktif menunggu eksekusi")
-        
-        pending_data = []
-        for symbol, data in st.session_state.pending_signal.items():
-            elapsed = (datetime.now() - data["time"]).seconds / 60
-            remaining = max(0, hold_minutes - elapsed)
-            entry = data.get("entry")
-            sl = data.get("sl")
-            tp = data.get("tp")
-            
-            if entry and sl and tp:
-                rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-            else:
-                rr = 0
-            
-            pending_data.append({
-                "Coin": symbol,
-                "Signal": data["signal"],
-                "Entry": format_price(entry),
-                "TP": format_price(tp),
-                "SL": format_price(sl),
-                "RR": f"{rr:.2f}",
-                "Time Left": f"{remaining:.0f}m",
-                "Timeframe": data.get("timeframe", "5m")
-            })
-        
-        if pending_data:
-            df_pending = pd.DataFrame(pending_data)
-            st.dataframe(df_pending, use_container_width=True, hide_index=True)
-        
-        # Card per coin
-        st.caption("Detail per coin:")
-        cols = st.columns(min(len(st.session_state.pending_signal), 4))
-        for idx, (symbol, data) in enumerate(st.session_state.pending_signal.items()):
-            col_idx = idx % len(cols)
-            with cols[col_idx]:
-                elapsed = (datetime.now() - data["time"]).seconds / 60
-                remaining = max(0, hold_minutes - elapsed)
-                entry = data.get("entry")
-                sl = data.get("sl")
-                tp = data.get("tp")
-                
-                if entry and sl and tp:
-                    rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-                else:
-                    rr = 0
-                
-                st.markdown(f"""
-                <div class="pending-signal">
-                    <b>{symbol}</b><br>
-                    {data['signal']}<br>
-                    📈 Entry: {format_price(entry)}<br>
-                    🎯 TP: {format_price(tp)}<br>
-                    🛑 SL: {format_price(sl)}<br>
-                    📊 RR: {rr:.2f}<br>
-                    ⏱️ {remaining:.0f}m remaining
-                </div>
-                """, unsafe_allow_html=True)
 
 # ==================== TAB 2: CHART ANALYSIS ====================
 with tab2:
