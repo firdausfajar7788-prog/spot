@@ -1075,7 +1075,7 @@ with tab2:
             st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
 # ==================== TAB 3: POSITIONS ====================
-# ==================== TAB 3: POSITIONS ====================
+ 
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
