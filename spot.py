@@ -1075,6 +1075,7 @@ with tab2:
             st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
 # ==================== TAB 3: POSITIONS ====================
+# ==================== TAB 3: POSITIONS ====================
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
@@ -1091,14 +1092,25 @@ with tab3:
                 if current_price > pos.get("highest_price", 0):
                     pos["highest_price"] = current_price
                 
+                # Hitung PNL
+                pnl_percent = (current_price / pos['entry'] - 1) * 100
+                
+                # Warna PNL (hijau jika profit, merah jika loss)
+                if pnl_percent > 0:
+                    pnl_color = "🟢"
+                elif pnl_percent < 0:
+                    pnl_color = "🔴"
+                else:
+                    pnl_color = "🟡"
+                
                 pos_data.append({
                     "Coin": symbol,
                     "Entry": format_price(pos.get("entry")),
                     "Current": format_price(current_price),
                     "SL": format_price(pos.get("sl")),
                     "TP": format_price(pos.get("tp")),
-                    "PNL": f"{(current_price/pos['entry'] - 1) * 100:.2f}%",
-                    "Exit Signal": exit_signal if exit_signal else "HOLD",
+                    "PNL": f"{pnl_color} {pnl_percent:.2f}%",
+                    "Exit Signal": exit_signal if exit_signal else "🟡 HOLD",
                     "Entry Time": pos.get("entry_time", "").strftime("%Y-%m-%d %H:%M")
                 })
                 
@@ -1117,8 +1129,23 @@ with tab3:
         if pos_data:
             df_pos = pd.DataFrame(pos_data)
             st.dataframe(df_pos, use_container_width=True, hide_index=True)
+            
+            # ========== SUMMARY STATISTICS ==========
+            st.divider()
+            st.subheader("📊 Portfolio Summary")
+            
+            total_positions = len(pos_data)
+            total_profit = sum([float(p["PNL"].replace("🟢", "").replace("🔴", "").replace("🟡", "").replace("%", "")) for p in pos_data])
+            winning_positions = len([p for p in pos_data if "🟢" in p["PNL"]])
+            losing_positions = len([p for p in pos_data if "🔴" in p["PNL"]])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Positions", total_positions)
+            col2.metric("Winning", winning_positions, delta=f"+{winning_positions}" if winning_positions > 0 else "0")
+            col3.metric("Losing", losing_positions, delta=f"-{losing_positions}" if losing_positions > 0 else "0")
+            col4.metric("Total PNL", f"{total_profit:.2f}%", delta=f"{total_profit:.2f}%" if total_profit != 0 else "0%")
     else:
-        st.info("Tidak ada posisi terbuka")
+        st.info("📭 Tidak ada posisi terbuka")
     
     st.divider()
     st.subheader("📊 Closed Positions")
@@ -1129,7 +1156,32 @@ with tab3:
         df_closed = pd.DataFrame(closed)
         if 'id' in df_closed.columns:
             df_closed = df_closed.drop('id', axis=1)
+        
+        # Tambahkan PNL color
+        if 'profit_pct' in df_closed.columns:
+            df_closed['PNL'] = df_closed['profit_pct'].apply(
+                lambda x: f"🟢 {x:.2f}%" if x > 0 else f"🔴 {x:.2f}%" if x < 0 else f"🟡 {x:.2f}%"
+            )
+        
         st.dataframe(df_closed, use_container_width=True, hide_index=True)
+        
+        # ========== CLOSED POSITIONS SUMMARY ==========
+        if 'profit_pct' in df_closed.columns:
+            total_closed = len(df_closed)
+            total_profit_closed = df_closed['profit_pct'].sum()
+            wins = len(df_closed[df_closed['profit_pct'] > 0])
+            losses = len(df_closed[df_closed['profit_pct'] < 0])
+            win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+            
+            st.divider()
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Total Closed", total_closed)
+            col2.metric("Wins", wins)
+            col3.metric("Losses", losses)
+            col4.metric("Win Rate", f"{win_rate:.1f}%")
+            col5.metric("Total PNL", f"{total_profit_closed:.2f}%")
+    else:
+        st.info("Belum ada posisi yang ditutup")
 
 # ==================== TAB 4: HISTORY ====================
 with tab4:
