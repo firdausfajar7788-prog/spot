@@ -894,7 +894,19 @@ def check_exit_conditions(position, df, highest_price=None):
     
     # 5. Time-based exit (7 hari)
     if position.get("entry_time"):
-        holding_days = (datetime.now() - position["entry_time"]).days
+        # ========== PERBAIKAN: Konversi ke datetime ==========
+        entry_time = position["entry_time"]
+        if isinstance(entry_time, str):
+            # Jika string, convert ke datetime
+            try:
+                entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+            except:
+                try:
+                    entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                except:
+                    entry_time = datetime.now()  # fallback
+        
+        holding_days = (datetime.now() - entry_time).days
         if holding_days > 7:
             return "⏰ TIME EXIT (7 days)", price
     
@@ -1268,58 +1280,74 @@ with tab3:
     
     # ========== UPDATE POSISI YANG SEDANG BERJALAN ==========
     for pos in open_positions:
-        symbol = pos["symbol"]
-        position_id = pos["id"]
-        entry = pos["entry_price"]
-        sl = pos["stop_loss"]
-        tp = pos["take_profit"]
-        
-        # Ambil harga terkini
-        df = get_data_safe(symbol, "15m", min_candles=20)
-        if df is not None:
-            current_price = df["Close"].iloc[-1]
+            symbol = pos["symbol"]
+            position_id = pos["id"]
+            entry = pos["entry_price"]
+            sl = pos["stop_loss"]
+            tp = pos["take_profit"]
             
-            # Update highest price untuk trailing stop
-            highest = pos.get("highest_price", entry)
-            if current_price > highest:
-                highest = current_price
+            # ========== PERBAIKAN: Pastikan entry_time ==========
+            entry_time = pos["entry_time"]
+            if isinstance(entry_time, str):
+                try:
+                    entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                except:
+                    try:
+                        entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                    except:
+                        entry_time = datetime.now()
             
-            # Hitung PNL
-            pnl = (current_price - entry) * pos.get("position_size", 0)
-            pnl_percent = (current_price / entry - 1) * 100
-            
-            # Update di database
-            update_position_in_db(position_id, {
-                "current_price": current_price,
-                "highest_price": highest,
-                "pnl": pnl,
-                "pnl_percent": pnl_percent
-            })
-            
-            # Cek kondisi exit
-            exit_signal, exit_price = check_exit_conditions(
-                {"entry": entry, "sl": sl, "tp": tp, "entry_time": pos["entry_time"]}, 
-                df, 
-                highest
-            )
-            
-            # Auto exit jika ada sinyal
-            if exit_signal:
-                pnl_exit = (exit_price - entry) * pos.get("position_size", 0)
-                pnl_percent_exit = (exit_price / entry - 1) * 100
+            # Ambil harga terkini
+            df = get_data_safe(symbol, "15m", min_candles=20)
+            if df is not None:
+                current_price = df["Close"].iloc[-1]
                 
-                close_position_in_db(position_id, exit_price, exit_signal, pnl_exit, pnl_percent_exit)
+                # Update highest price untuk trailing stop
+                highest = pos.get("highest_price", entry)
+                if current_price > highest:
+                    highest = current_price
                 
-                # Simpan ke signal_history
-                save_signal({
-                    'symbol': symbol,
-                    'signal': f"EXIT - {exit_signal}",
-                    'exit_price': exit_price,
-                    'profit_pct': pnl_percent_exit,
-                    'timestamp': datetime.now().isoformat()
+                # Hitung PNL
+                pnl = (current_price - entry) * pos.get("position_size", 0)
+                pnl_percent = (current_price / entry - 1) * 100
+                
+                # Update di database
+                update_position_in_db(position_id, {
+                    "current_price": current_price,
+                    "highest_price": highest,
+                    "pnl": pnl,
+                    "pnl_percent": pnl_percent
                 })
                 
-                st.rerun()
+                # ========== PERBAIKAN: Kirim entry_time yang sudah di-convert ==========
+                exit_signal, exit_price = check_exit_conditions(
+                    {
+                        "entry": entry, 
+                        "sl": sl, 
+                        "tp": tp, 
+                        "entry_time": entry_time  # <-- Kirim datetime object
+                    }, 
+                    df, 
+                    highest
+                )
+                
+                # Auto exit jika ada sinyal
+                if exit_signal:
+                    pnl_exit = (exit_price - entry) * pos.get("position_size", 0)
+                    pnl_percent_exit = (exit_price / entry - 1) * 100
+                    
+                    close_position_in_db(position_id, exit_price, exit_signal, pnl_exit, pnl_percent_exit)
+                    
+                    # Simpan ke signal_history
+                    save_signal({
+                        'symbol': symbol,
+                        'signal': f"EXIT - {exit_signal}",
+                        'exit_price': exit_price,
+                        'profit_pct': pnl_percent_exit,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
+                    st.rerun()
     
     # ========== REFRESH DATA SETELAH UPDATE ==========
     portfolio_data = get_portfolio_summary()
