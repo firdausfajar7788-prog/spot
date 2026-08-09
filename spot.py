@@ -1084,7 +1084,6 @@ with tab2:
             st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
 # ==================== TAB 3: POSITIONS ====================
-# ==================== TAB 3: POSITIONS ====================
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
@@ -1254,7 +1253,6 @@ with tab3:
             col5.metric("Total PNL", f"{total_profit_closed:.2f}%")
     else:
         st.info("Belum ada posisi yang ditutup")
-
 # ==================== TAB 4: HISTORY ====================
 with tab4:
     st.subheader("📜 Signal History")
