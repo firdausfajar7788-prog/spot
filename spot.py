@@ -1269,207 +1269,234 @@ with tab2:
 
 # ==================== TAB 3: POSITIONS ====================
  
-# ==================== TAB 3: POSITIONS (VERSION 2 - DATABASE) ====================
+ 
 with tab3:
     st.subheader("📊 Portfolio Management")
     
-    # ========== AMBIL DATA DARI DATABASE ==========
-    portfolio_data = get_portfolio_summary()
-    open_positions = portfolio_data["open_positions"]
-    closed_positions = portfolio_data["closed_positions"]
-    
-    # ========== UPDATE POSISI YANG SEDANG BERJALAN ==========
-    for pos in open_positions:
-            symbol = pos["symbol"]
-            position_id = pos["id"]
-            entry = pos["entry_price"]
-            sl = pos["stop_loss"]
-            tp = pos["take_profit"]
-            
-            # ========== PERBAIKAN: Pastikan entry_time ==========
-            entry_time = pos["entry_time"]
-            if isinstance(entry_time, str):
-                try:
-                    entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
-                except:
-                    try:
-                        entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
-                    except:
-                        entry_time = datetime.now()
-            
-            # Ambil harga terkini
-            df = get_data_safe(symbol, "15m", min_candles=20)
-            if df is not None:
-                current_price = df["Close"].iloc[-1]
+    try:
+        # ========== AMBIL DATA DARI DATABASE ==========
+        portfolio_data = get_portfolio_summary()
+        open_positions = portfolio_data["open_positions"]
+        closed_positions = portfolio_data["closed_positions"]
+        
+        # ========== UPDATE POSISI YANG SEDANG BERJALAN ==========
+        for pos in open_positions:
+            try:
+                symbol = pos["symbol"]
+                position_id = pos["id"]
+                entry = pos["entry_price"]
+                sl = pos["stop_loss"]
+                tp = pos["take_profit"]
                 
-                # Update highest price untuk trailing stop
-                highest = pos.get("highest_price", entry)
-                if current_price > highest:
-                    highest = current_price
-                
-                # Hitung PNL
-                pnl = (current_price - entry) * pos.get("position_size", 0)
-                pnl_percent = (current_price / entry - 1) * 100
-                
-                # Update di database
-                update_position_in_db(position_id, {
-                    "current_price": current_price,
-                    "highest_price": highest,
-                    "pnl": pnl,
-                    "pnl_percent": pnl_percent
-                })
-                
-                # ========== PERBAIKAN: Kirim entry_time yang sudah di-convert ==========
-                exit_signal, exit_price = check_exit_conditions(
-                    {
-                        "entry": entry, 
-                        "sl": sl, 
-                        "tp": tp, 
-                        "entry_time": entry_time  # <-- Kirim datetime object
-                    }, 
-                    df, 
-                    highest
-                )
-                
-                # Auto exit jika ada sinyal
-                if exit_signal:
-                    pnl_exit = (exit_price - entry) * pos.get("position_size", 0)
-                    pnl_percent_exit = (exit_price / entry - 1) * 100
+                # Ambil harga terkini
+                df = get_data_safe(symbol, "15m", min_candles=20)
+                if df is not None and not df.empty:
+                    current_price = df["Close"].iloc[-1]
                     
-                    close_position_in_db(position_id, exit_price, exit_signal, pnl_exit, pnl_percent_exit)
+                    # Update highest price untuk trailing stop
+                    highest = pos.get("highest_price", entry)
+                    if current_price > highest:
+                        highest = current_price
                     
-                    # Simpan ke signal_history
-                    save_signal({
-                        'symbol': symbol,
-                        'signal': f"EXIT - {exit_signal}",
-                        'exit_price': exit_price,
-                        'profit_pct': pnl_percent_exit,
-                        'timestamp': datetime.now().isoformat()
+                    # Hitung PNL
+                    position_size = pos.get("position_size", 1)
+                    pnl = (current_price - entry) * position_size
+                    pnl_percent = (current_price / entry - 1) * 100
+                    
+                    # Update di database
+                    update_position_in_db(position_id, {
+                        "current_price": current_price,
+                        "highest_price": highest,
+                        "pnl": pnl,
+                        "pnl_percent": pnl_percent
                     })
                     
-                    st.rerun()
-    
-    # ========== REFRESH DATA SETELAH UPDATE ==========
-    portfolio_data = get_portfolio_summary()
-    open_positions = portfolio_data["open_positions"]
-    closed_positions = portfolio_data["closed_positions"]
-    
-    # ========== PORTFOLIO SUMMARY (SEPERTI WALLET) ==========
-    st.subheader("💰 Portfolio Summary")
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    # Total Equity (harga current semua posisi + cash - unrealized)
-    total_equity = sum([p.get("current_price", 0) * p.get("position_size", 0) for p in open_positions])
-    
-    col1.metric(
-        "📊 Total Equity", 
-        f"${total_equity:,.2f}",
-        delta=f"+${portfolio_data['total_pnl']:,.2f}" if portfolio_data['total_pnl'] >= 0 else f"-${abs(portfolio_data['total_pnl']):,.2f}"
-    )
-    
-    col2.metric(
-        "📈 Realized PNL",
-        f"${portfolio_data['realized_pnl']:,.2f}",
-        delta=f"{portfolio_data['win_rate']:.1f}% Win Rate"
-    )
-    
-    col3.metric(
-        "📉 Unrealized PNL",
-        f"${portfolio_data['unrealized_pnl']:,.2f}",
-        delta=f"{portfolio_data['unrealized_pnl_percent']:.2f}%"
-    )
-    
-    col4.metric(
-        "🔄 Total PNL",
-        f"${portfolio_data['total_pnl']:,.2f}",
-        delta=f"{(portfolio_data['total_pnl']/max(1, total_equity) * 100):.2f}%"
-    )
-    
-    col5.metric(
-        "🎯 Win Rate",
-        f"{portfolio_data['win_rate']:.1f}%",
-        delta=f"{portfolio_data['wins']}W / {portfolio_data['losses']}L"
-    )
-    
-    st.divider()
-    
-    # ========== OPEN POSITIONS (TABEL) ==========
-    st.subheader("📋 Open Positions")
-    
-    if open_positions:
-        pos_data = []
-        for pos in open_positions:
-            pnl = pos.get("pnl", 0)
-            pnl_percent = pos.get("pnl_percent", 0)
-            
-            # Warna PNL
-            if pnl > 0:
-                pnl_color = "🟢"
-            elif pnl < 0:
-                pnl_color = "🔴"
-            else:
-                pnl_color = "🟡"
-            
-            pos_data.append({
-                "Coin": pos["symbol"],
-                "Entry": format_price(pos["entry_price"]),
-                "Current": format_price(pos.get("current_price", pos["entry_price"])),
-                "SL": format_price(pos["stop_loss"]),
-                "TP": format_price(pos["take_profit"]),
-                "Size": f"{pos.get('position_size', 0):.4f}",
-                "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
-                "Entry Time": datetime.fromisoformat(pos["entry_time"]).strftime("%Y-%m-%d %H:%M")
-            })
+                    # Cek kondisi exit
+                    exit_signal, exit_price = check_exit_conditions(
+                        {"entry": entry, "sl": sl, "tp": tp, "entry_time": pos.get("entry_time", datetime.now().isoformat())}, 
+                        df, 
+                        highest
+                    )
+                    
+                    # Auto exit jika ada sinyal
+                    if exit_signal:
+                        pnl_exit = (exit_price - entry) * position_size
+                        pnl_percent_exit = (exit_price / entry - 1) * 100
+                        
+                        close_position_in_db(position_id, exit_price, exit_signal, pnl_exit, pnl_percent_exit)
+                        
+                        # Simpan ke signal_history
+                        save_signal({
+                            'symbol': symbol,
+                            'signal': f"EXIT - {exit_signal}",
+                            'exit_price': exit_price,
+                            'profit_pct': pnl_percent_exit,
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        
+                        st.rerun()
+                else:
+                    # Jika gagal ambil data, skip
+                    st.warning(f"⚠️ Cannot get data for {symbol}, skipping...")
+                    continue
+                    
+            except Exception as e:
+                st.warning(f"⚠️ Error updating {pos.get('symbol', 'unknown')}: {str(e)[:50]}...")
+                continue
         
-        df_open = pd.DataFrame(pos_data)
-        st.dataframe(df_open, use_container_width=True, hide_index=True)
-    else:
-        st.info("📭 Tidak ada posisi terbuka")
-    
-    st.divider()
-    
-    # ========== CLOSED POSITIONS (TABEL) ==========
-    st.subheader("📊 Closed Positions")
-    
-    if closed_positions:
-        closed_data = []
-        for pos in closed_positions[:50]:
-            pnl = pos.get("pnl", 0)
-            pnl_percent = pos.get("pnl_percent", 0)
-            
-            if pnl > 0:
-                pnl_color = "🟢"
-            elif pnl < 0:
-                pnl_color = "🔴"
-            else:
-                pnl_color = "🟡"
-            
-            exit_reason = pos.get("exit_reason", "UNKNOWN")
-            exit_emoji = "✅" if "TP" in exit_reason else "❌" if "SL" in exit_reason else "🔄"
-            
-            closed_data.append({
-                "Coin": pos["symbol"],
-                "Entry": format_price(pos["entry_price"]),
-                "Exit": format_price(pos.get("exit_price", pos["entry_price"])),
-                "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
-                "Exit Reason": f"{exit_emoji} {exit_reason}",
-                "Exit Time": datetime.fromisoformat(pos["exit_time"]).strftime("%Y-%m-%d %H:%M")
-            })
+        # ========== REFRESH DATA SETELAH UPDATE ==========
+        portfolio_data = get_portfolio_summary()
+        open_positions = portfolio_data["open_positions"]
+        closed_positions = portfolio_data["closed_positions"]
         
-        df_closed = pd.DataFrame(closed_data)
-        st.dataframe(df_closed, use_container_width=True, hide_index=True)
-    else:
-        st.info("Belum ada posisi yang ditutup")
-    
-    # ========== CLOSED POSITIONS SUMMARY ==========
-    if closed_positions:
+        # ========== PORTFOLIO SUMMARY (SEPERTI WALLET) ==========
+        st.subheader("💰 Portfolio Summary")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        # Total Equity
+        total_equity = sum([p.get("current_price", 0) * p.get("position_size", 0) for p in open_positions])
+        
+        col1.metric(
+            "📊 Total Equity", 
+            f"${total_equity:,.2f}",
+            delta=f"+${portfolio_data['total_pnl']:,.2f}" if portfolio_data['total_pnl'] >= 0 else f"-${abs(portfolio_data['total_pnl']):,.2f}"
+        )
+        
+        col2.metric(
+            "📈 Realized PNL",
+            f"${portfolio_data['realized_pnl']:,.2f}",
+            delta=f"{portfolio_data['win_rate']:.1f}% Win Rate"
+        )
+        
+        col3.metric(
+            "📉 Unrealized PNL",
+            f"${portfolio_data['unrealized_pnl']:,.2f}",
+            delta=f"{portfolio_data['unrealized_pnl_percent']:.2f}%"
+        )
+        
+        col4.metric(
+            "🔄 Total PNL",
+            f"${portfolio_data['total_pnl']:,.2f}",
+            delta=f"{(portfolio_data['total_pnl']/max(1, total_equity) * 100):.2f}%"
+        )
+        
+        col5.metric(
+            "🎯 Win Rate",
+            f"{portfolio_data['win_rate']:.1f}%",
+            delta=f"{portfolio_data['wins']}W / {portfolio_data['losses']}L"
+        )
+        
         st.divider()
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Trades", len(closed_positions))
-        col2.metric("Wins", portfolio_data["wins"])
-        col3.metric("Losses", portfolio_data["losses"])
-        col4.metric("Win Rate", f"{portfolio_data['win_rate']:.1f}%")
+        
+        # ========== OPEN POSITIONS (TABEL) ==========
+        st.subheader("📋 Open Positions")
+        
+        if open_positions:
+            pos_data = []
+            for pos in open_positions:
+                try:
+                    pnl = pos.get("pnl", 0)
+                    pnl_percent = pos.get("pnl_percent", 0)
+                    
+                    if pnl > 0:
+                        pnl_color = "🟢"
+                    elif pnl < 0:
+                        pnl_color = "🔴"
+                    else:
+                        pnl_color = "🟡"
+                    
+                    entry_time = pos.get("entry_time", "")
+                    if entry_time and isinstance(entry_time, str):
+                        try:
+                            entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
+                        except:
+                            entry_time = entry_time[:16] if len(entry_time) > 16 else entry_time
+                    else:
+                        entry_time = ""
+                    
+                    pos_data.append({
+                        "Coin": pos["symbol"],
+                        "Entry": format_price(pos["entry_price"]),
+                        "Current": format_price(pos.get("current_price", pos["entry_price"])),
+                        "SL": format_price(pos["stop_loss"]),
+                        "TP": format_price(pos["take_profit"]),
+                        "Size": f"{pos.get('position_size', 0):.4f}",
+                        "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
+                        "Entry Time": entry_time
+                    })
+                except Exception as e:
+                    continue
+            
+            if pos_data:
+                df_open = pd.DataFrame(pos_data)
+                st.dataframe(df_open, use_container_width=True, hide_index=True)
+            else:
+                st.info("📭 Tidak ada posisi terbuka")
+        else:
+            st.info("📭 Tidak ada posisi terbuka")
+        
+        st.divider()
+        
+        # ========== CLOSED POSITIONS (TABEL) ==========
+        st.subheader("📊 Closed Positions")
+        
+        if closed_positions:
+            closed_data = []
+            for pos in closed_positions[:50]:
+                try:
+                    pnl = pos.get("pnl", 0)
+                    pnl_percent = pos.get("pnl_percent", 0)
+                    
+                    if pnl > 0:
+                        pnl_color = "🟢"
+                    elif pnl < 0:
+                        pnl_color = "🔴"
+                    else:
+                        pnl_color = "🟡"
+                    
+                    exit_reason = pos.get("exit_reason", "UNKNOWN")
+                    exit_emoji = "✅" if "TP" in exit_reason else "❌" if "SL" in exit_reason else "🔄"
+                    
+                    exit_time = pos.get("exit_time", "")
+                    if exit_time and isinstance(exit_time, str):
+                        try:
+                            exit_time = datetime.fromisoformat(exit_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
+                        except:
+                            exit_time = exit_time[:16] if len(exit_time) > 16 else exit_time
+                    else:
+                        exit_time = ""
+                    
+                    closed_data.append({
+                        "Coin": pos["symbol"],
+                        "Entry": format_price(pos["entry_price"]),
+                        "Exit": format_price(pos.get("exit_price", pos["entry_price"])),
+                        "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
+                        "Exit Reason": f"{exit_emoji} {exit_reason}",
+                        "Exit Time": exit_time
+                    })
+                except Exception as e:
+                    continue
+            
+            if closed_data:
+                df_closed = pd.DataFrame(closed_data)
+                st.dataframe(df_closed, use_container_width=True, hide_index=True)
+                
+                # ========== CLOSED POSITIONS SUMMARY ==========
+                st.divider()
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Trades", len(closed_positions))
+                col2.metric("Wins", portfolio_data["wins"])
+                col3.metric("Losses", portfolio_data["losses"])
+                col4.metric("Win Rate", f"{portfolio_data['win_rate']:.1f}%")
+            else:
+                st.info("Belum ada posisi yang ditutup")
+        else:
+            st.info("Belum ada posisi yang ditutup")
+            
+    except Exception as e:
+        st.error(f"❌ Error loading portfolio: {str(e)}")
+        st.info("Silakan refresh halaman atau coba lagi nanti.")
 
 # ==================== TAB 4: HISTORY ====================
 with tab4:
