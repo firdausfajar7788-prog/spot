@@ -848,7 +848,7 @@ with tab1:
         del st.session_state.pending_signal[sym]
 
     for idx, symbol in enumerate(st.session_state.watchlist[:50]):
-        progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:20]))
+        progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:50]))
         status_text.text(f"🔄 Scanning {symbol}...")
         
         result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
