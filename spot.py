@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="🤖 Crypto Bot PRO - SPOT (MACD + Stoch RSI)",
+    page_title="🚀 Crypto Momentum Scanner PRO - SPOT",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -201,6 +201,100 @@ def get_performance():
         return default
     except:
         return default
+
+
+# =========================================================
+# MOMENTUM HISTORY DATABASE
+# =========================================================
+def save_momentum_history(result):
+    """
+    Simpan snapshot momentum ke tabel momentum_history.
+    Jika tabel belum dibuat di Supabase, fungsi hanya gagal secara aman
+    dan scanner tetap berjalan.
+    """
+    if not result:
+        return False
+
+    try:
+        supabase = get_supabase()
+        tf = result.get("timeframes", {})
+
+        r4 = tf.get("4h", {})
+        r1 = tf.get("1h", {})
+        r15 = tf.get("15m", {})
+
+        now = datetime.now()
+        # Bucket 1 menit agar auto-refresh 30 detik tidak menggandakan data.
+        bucket = now.replace(second=0, microsecond=0)
+
+        data = {
+            "symbol": result.get("symbol"),
+            "scan_time": now.isoformat(),
+            "time_bucket": bucket.isoformat(),
+            "score": float(result.get("score", 0)),
+            "status": result.get("status"),
+
+            "score_4h": float(r4.get("score", 0)),
+            "score_1h": float(r1.get("score", 0)),
+            "score_15m": float(r15.get("score", 0)),
+
+            "rsi_1h": float(r1.get("rsi", 0)),
+            "volume_ratio_1h": float(r1.get("volume_ratio", 0)),
+            "breakout_1h": bool(r1.get("breakout", False)),
+
+            "macd_1h": float(r1.get("macd", 0)),
+            "macd_signal_1h": float(r1.get("signal", 0)),
+            "macd_histogram_1h": float(r1.get("histogram", 0)),
+            "macd_acceleration_1h": bool(r1.get("macd_acceleration", False)),
+
+            "bb_width_1h": float(r1.get("bb_width", 0)),
+            "bb_expanding_1h": bool(r1.get("bb_expanding", False)),
+
+            "price_1h": float(r1.get("price", 0)),
+        }
+
+        # Upsert berdasarkan symbol + time_bucket.
+        supabase.table("momentum_history").upsert(
+            data,
+            on_conflict="symbol,time_bucket"
+        ).execute()
+
+        return True
+
+    except Exception as e:
+        # Jangan membuat scanner mati hanya karena tabel DB belum ada.
+        print(f"Momentum DB save skipped: {e}")
+        return False
+
+
+def get_momentum_history(symbol=None, limit=200):
+    try:
+        supabase = get_supabase()
+        query = (
+            supabase.table("momentum_history")
+            .select("*")
+            .order("scan_time", desc=True)
+            .limit(limit)
+        )
+
+        if symbol:
+            query = query.eq("symbol", symbol.upper())
+
+        res = query.execute()
+        return res.data if res.data else []
+
+    except Exception as e:
+        print(f"Momentum history read error: {e}")
+        return []
+
+
+def get_latest_momentum_history(limit=100):
+    """
+    Ambil snapshot terbaru. Digunakan sebagai data historis ringan
+    untuk tab/history, bukan untuk menghitung sinyal.
+    """
+    return get_momentum_history(limit=limit)
+
 
 # =========================================================
 # POSITIONS DATABASE FUNCTIONS
@@ -689,7 +783,8 @@ def scan_momentum(symbol):
         return None
 
     tf = result["timeframes"]
-    return {
+
+    result["table"] = {
         "Coin": symbol,
         "Score": result["score"],
         "Status": result["status"],
@@ -700,6 +795,8 @@ def scan_momentum(symbol):
         "RSI 1H": tf.get("1h", {}).get("rsi", 0),
         "Breakout 1H": tf.get("1h", {}).get("breakout", False),
     }
+
+    return result
 
 # =========================================================
 # ALGORITMA TRADING SPOT - MACD + STOCHASTIC RSI
@@ -1184,8 +1281,31 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📊 Scanner Settings")
-    refresh = st.slider("🔄 Refresh (detik)", 10, 60, 30)
-    hold_minutes = st.slider("Hold Signal (menit)", 5, 30, 15, key="hold_minutes")
+
+    auto_refresh = st.toggle(
+        "🔄 Auto Refresh",
+        value=False,
+        help="Matikan saat debugging agar aplikasi tidak melakukan rerun otomatis."
+    )
+
+    refresh = st.slider(
+        "Interval Refresh (detik)",
+        30, 120, 60,
+        step=10,
+        disabled=not auto_refresh
+    )
+
+    scan_limit = st.slider(
+        "Jumlah coin yang discan",
+        5, 30, 20,
+        step=5
+    )
+
+    hold_minutes = st.slider(
+        "Hold Signal (menit)",
+        5, 30, 15,
+        key="hold_minutes"
+    )
     
     st.divider()
     st.subheader("📱 Telegram Alert")
@@ -1199,13 +1319,19 @@ with st.sidebar:
     stats = get_performance()
     st.metric("Total Signals", stats.get('total_signals', 0))
     st.metric("Open Positions", len(st.session_state.positions))
-    st.caption(f"🔄 Auto Refresh: {refresh} detik")
+    st.caption("🔄 Auto Refresh: {} | Interval: {} detik".format("ON" if auto_refresh else "OFF", refresh))
     st.caption("📌 Mode: SPOT Momentum Scanner (No Auto Entry)")
 
 # =========================================================
 # AUTO REFRESH
 # =========================================================
-st_autorefresh(interval=refresh * 1000, key="refresh")
+# Tidak ada while-loop. Streamlit hanya rerun sesuai interval
+# jika Auto Refresh memang diaktifkan oleh user.
+if auto_refresh:
+    st_autorefresh(
+        interval=refresh * 1000,
+        key="momentum_auto_refresh"
+    )
 
 # =========================================================
 # MAIN TABS
@@ -1218,12 +1344,21 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ==================== TAB 1: MOMENTUM SCANNER ====================
 with tab1:
     st.subheader("🚀 Momentum Scanner - SPOT")
-    st.caption("Scanner hanya mendeteksi momentum. Tidak otomatis membuka posisi.")
+    st.caption(
+        "Scanner mendeteksi momentum saja. Tidak otomatis membuka posisi."
+    )
 
-    all_momentum = []
-    coins = st.session_state.watchlist[:50]
+    # Cache hasil scan di session agar UI tidak menghitung ulang
+    # coin yang sama hanya untuk menampilkan detail.
+    if "momentum_results" not in st.session_state:
+        st.session_state.momentum_results = {}
 
-    if coins:
+    coins = st.session_state.watchlist[:scan_limit]
+    all_results = []
+
+    if not coins:
+        st.info("Tambahkan coin ke watchlist terlebih dahulu.")
+    else:
         progress = st.progress(0)
         status_text = st.empty()
 
@@ -1233,71 +1368,181 @@ with tab1:
 
             try:
                 result = scan_momentum(symbol)
+
                 if result:
-                    all_momentum.append(result)
+                    st.session_state.momentum_results[symbol] = result
+                    all_results.append(result)
+
+                    # Simpan snapshot ke DB.
+                    save_momentum_history(result)
+
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
 
         progress.empty()
         status_text.empty()
 
-    if all_momentum:
-        df_momentum = pd.DataFrame(all_momentum)
+    if all_results:
+        df_momentum = pd.DataFrame(
+            [r["table"] for r in all_results]
+        )
+
         df_momentum = (
-            df_momentum.sort_values("Score", ascending=False)
+            df_momentum
+            .sort_values("Score", ascending=False)
             .reset_index(drop=True)
         )
 
         display_df = df_momentum.copy()
-        display_df["Score"] = display_df["Score"].map(lambda x: f"{x:.2f}/10")
-        display_df["Volume 1H"] = display_df["Volume 1H"].map(lambda x: f"{x:.2f}x")
-        display_df["RSI 1H"] = display_df["RSI 1H"].map(lambda x: f"{x:.1f}")
-
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-        top = df_momentum.iloc[0]
-        st.success(
-            f"🏆 Top Momentum: **{top['Coin']}** | "
-            f"Score **{top['Score']:.2f}/10** | {top['Status']}"
+        display_df["Score"] = display_df["Score"].map(
+            lambda x: f"{x:.2f}/10"
+        )
+        display_df["Volume 1H"] = display_df["Volume 1H"].map(
+            lambda x: f"{x:.2f}x"
+        )
+        display_df["RSI 1H"] = display_df["RSI 1H"].map(
+            lambda x: f"{x:.1f}"
         )
 
-        with st.expander(f"🔎 Detail {top['Coin']}"):
-            detailed = analyze_momentum_mtf(top["Coin"])
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
-            if detailed:
+        top_symbol = df_momentum.iloc[0]["Coin"]
+        top_result = st.session_state.momentum_results.get(top_symbol)
+
+        if top_result:
+            st.success(
+                f"🏆 Top Momentum: **{top_symbol}** | "
+                f"Score **{top_result['score']:.2f}/10** | "
+                f"{top_result['status']}"
+            )
+
+            with st.expander(
+                f"🔎 Detail {top_symbol}",
+                expanded=False
+            ):
                 for tf in ["4h", "1h", "15m"]:
-                    if tf not in detailed["timeframes"]:
+                    if tf not in top_result["timeframes"]:
                         continue
 
-                    r = detailed["timeframes"][tf]
+                    r = top_result["timeframes"][tf]
+
                     st.markdown(
-                        f"### {tf.upper()} — {r['score']:.1f}/10 — {r['status']}"
+                        f"### {tf.upper()} — "
+                        f"{r['score']:.1f}/10 — {r['status']}"
                     )
 
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Price", format_price(r["price"]))
-                    c2.metric("RSI", f"{r['rsi']:.1f}")
-                    c3.metric("Volume", f"{r['volume_ratio']:.2f}x")
+
+                    c1.metric(
+                        "Price",
+                        format_price(r["price"])
+                    )
+                    c2.metric(
+                        "RSI",
+                        f"{r['rsi']:.1f}"
+                    )
+                    c3.metric(
+                        "Volume",
+                        f"{r['volume_ratio']:.2f}x"
+                    )
                     c4.metric(
                         "BB",
-                        "Expanding" if r["bb_expanding"] else "Not expanding"
+                        "Expanding"
+                        if r["bb_expanding"]
+                        else "Not expanding"
                     )
 
                     st.write(
                         f"MACD: `{r['macd']:.6f}` | "
                         f"Histogram: `{r['histogram']:.6f}`"
                     )
+
+                    st.write(
+                        "MACD acceleration: "
+                        + (
+                            "🟢 YES"
+                            if r["macd_acceleration"]
+                            else "⚪ NO"
+                        )
+                    )
+
                     st.write(
                         "Breakout 20 candle: "
-                        + ("✅ YES" if r["breakout"] else "❌ NO")
+                        + (
+                            "✅ YES"
+                            if r["breakout"]
+                            else "❌ NO"
+                        )
                     )
 
                     if r["reasons"]:
                         st.write("**Reasons:**")
                         for reason in r["reasons"]:
                             st.write(f"- {reason}")
+
+            # Momentum history chart dari database.
+            history = get_momentum_history(
+                symbol=top_symbol,
+                limit=100
+            )
+
+            if history:
+                hist_df = pd.DataFrame(history)
+
+                if "scan_time" in hist_df.columns and "score" in hist_df.columns:
+                    hist_df["scan_time"] = pd.to_datetime(
+                        hist_df["scan_time"],
+                        errors="coerce"
+                    )
+                    hist_df = (
+                        hist_df
+                        .dropna(subset=["scan_time", "score"])
+                        .sort_values("scan_time")
+                    )
+
+                    if not hist_df.empty:
+                        st.markdown(
+                            f"### 📈 Momentum History — {top_symbol}"
+                        )
+
+                        fig_momentum = go.Figure()
+
+                        fig_momentum.add_trace(
+                            go.Scatter(
+                                x=hist_df["scan_time"],
+                                y=hist_df["score"],
+                                mode="lines+markers",
+                                name="Momentum Score"
+                            )
+                        )
+
+                        fig_momentum.add_hline(
+                            y=7,
+                            line_dash="dash",
+                            annotation_text="Early Momentum"
+                        )
+
+                        fig_momentum.update_layout(
+                            height=320,
+                            yaxis_title="Score",
+                            xaxis_title="Time",
+                            yaxis_range=[0, 10]
+                        )
+
+                        st.plotly_chart(
+                            fig_momentum,
+                            use_container_width=True
+                        )
+
     else:
-        st.info("ℹ️ Belum ada data momentum. Pastikan watchlist berisi coin yang valid.")
+        st.info(
+            "ℹ️ Belum ada data momentum. "
+            "Pastikan watchlist berisi coin yang valid."
+        )
 
 # ==================== TAB 2: CHART ANALYSIS ====================
 with tab2:
