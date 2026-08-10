@@ -10,7 +10,7 @@ import os
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 from supabase import create_client, Client
-from ta.volatility import AverageTrueRange
+from ta.volatility import AverageTrueRange, BollingerBands
 
 load_dotenv()
 warnings.filterwarnings('ignore')
@@ -446,17 +446,16 @@ def get_data(symbol, interval, period):
     except:
         return None
 
-def get_data_safe(symbol, interval, min_candles=20):
+def get_data_safe(symbol, interval, min_candles=150):
     periods = {
-        "1m": ["1d", "5d", "7d"],
-        "5m": ["2d", "5d", "7d", "14d"],
-        "15m": ["5d", "7d", "14d", "30d"],
-        "30m": ["7d", "14d", "30d"],
-        "1h": ["7d", "14d", "30d", "60d"],
-        "4h": ["14d", "30d", "60d", "90d"],
-        "1d": ["30d", "60d", "90d", "1y"],
+        "5m": ["3d", "7d", "14d"],
+        "15m": ["7d", "14d", "30d"],
+        "30m": ["14d", "30d"],
+        "1h": ["14d", "30d", "60d"],
+        "4h": ["30d", "60d", "90d"],
+        "1d": ["180d", "1y"],
     }
-    for period in periods.get(interval, ["7d", "14d", "30d"]):
+    for period in periods.get(interval, ["14d", "30d"]):
         df = get_data(symbol, interval, period)
         if df is not None and len(df) >= min_candles:
             return df
@@ -488,6 +487,219 @@ def StochasticRSI(df, period=14, smooth_k=3, smooth_d=3):
     k = stoch_rsi.rolling(smooth_k).mean()
     d = k.rolling(smooth_d).mean()
     return k, d, rsi
+
+
+# =========================================================
+# MOMENTUM ENGINE - SPOT
+# =========================================================
+def calculate_bollinger(df, window=20, std=2):
+    bb = BollingerBands(
+        close=df["Close"],
+        window=window,
+        window_dev=std
+    )
+    upper = bb.bollinger_hband()
+    middle = bb.bollinger_mavg()
+    lower = bb.bollinger_lband()
+    width = (upper - lower) / middle.replace(0, pd.NA)
+    return upper, middle, lower, width
+
+
+def calculate_momentum_score(df, timeframe="1h"):
+    """Score 0-10 untuk mendeteksi momentum bullish."""
+    if df is None or len(df) < 150:
+        return None
+
+    close = df["Close"]
+    ema20 = EMA(df, 20)
+    ema50 = EMA(df, 50)
+    ema100 = EMA(df, 100)
+
+    macd_line, signal_line, histogram = MACD(df)
+    _, _, rsi = StochasticRSI(df)
+    _, _, _, bb_width = calculate_bollinger(df)
+
+    volume_ma20 = df["Volume"].rolling(20).mean()
+    volume_ratio = (
+        df["Volume"].iloc[-1] / volume_ma20.iloc[-1]
+        if volume_ma20.iloc[-1] > 0 else 1
+    )
+
+    price = float(close.iloc[-1])
+    ema20_now = float(ema20.iloc[-1])
+    ema50_now = float(ema50.iloc[-1])
+    ema100_now = float(ema100.iloc[-1])
+
+    macd_now = float(macd_line.iloc[-1])
+    signal_now = float(signal_line.iloc[-1])
+    hist_now = float(histogram.iloc[-1])
+    hist_prev = float(histogram.iloc[-2])
+    hist_prev2 = float(histogram.iloc[-3])
+    rsi_now = float(rsi.iloc[-1])
+
+    bb_width_now = float(bb_width.iloc[-1])
+    bb_width_prev = float(bb_width.iloc[-2])
+
+    hist_delta_now = hist_now - hist_prev
+    hist_delta_prev = hist_prev - hist_prev2
+
+    macd_accelerating = hist_delta_now > hist_delta_prev
+    hist_improving = hist_now > hist_prev
+
+    price_above_ema20 = price > ema20_now
+    ema20_above_ema50 = ema20_now > ema50_now
+    ema50_above_ema100 = ema50_now > ema100_now
+
+    strong_trend = (
+        price_above_ema20
+        and ema20_above_ema50
+        and ema50_above_ema100
+    )
+    bullish_structure = price_above_ema20 and ema20_above_ema50
+
+    previous_high = float(df["High"].iloc[-21:-1].max())
+    breakout = price > previous_high
+    bb_expanding = bb_width_now > bb_width_prev
+
+    score = 0.0
+    reasons = []
+
+    if price_above_ema20:
+        score += 1
+        reasons.append("Harga > EMA20")
+    if ema20_above_ema50:
+        score += 1
+        reasons.append("EMA20 > EMA50")
+    if ema50_above_ema100:
+        score += 1
+        reasons.append("EMA50 > EMA100")
+
+    if macd_now > signal_now:
+        score += 1
+        reasons.append("MACD bullish")
+    if hist_improving:
+        score += 0.5
+        reasons.append("MACD histogram membaik")
+    if macd_accelerating:
+        score += 0.5
+        reasons.append("MACD acceleration")
+
+    if volume_ratio >= 1.5:
+        score += 1
+        reasons.append(f"Volume expansion {volume_ratio:.2f}x")
+
+    if breakout:
+        score += 1
+        reasons.append("Breakout 20 candle")
+
+    if bb_expanding:
+        score += 0.5
+        reasons.append("BB mulai melebar")
+
+    if 45 <= rsi_now <= 65:
+        score += 0.5
+        reasons.append(f"RSI sehat {rsi_now:.1f}")
+
+    score = min(score, 10.0)
+
+    if score >= 8:
+        status = "🔥 STRONG MOMENTUM"
+    elif score >= 7:
+        status = "🟢 EARLY MOMENTUM"
+    elif score >= 5:
+        status = "🟡 DEVELOPING"
+    elif score >= 3:
+        status = "⚪ WEAK"
+    else:
+        status = "🔴 NO MOMENTUM"
+
+    extended = rsi_now > 75 or price > ema20_now * 1.10
+    if extended:
+        status = "⚠️ EXTENDED"
+
+    return {
+        "score": round(score, 1),
+        "status": status,
+        "price": price,
+        "ema20": ema20_now,
+        "ema50": ema50_now,
+        "ema100": ema100_now,
+        "macd": macd_now,
+        "signal": signal_now,
+        "histogram": hist_now,
+        "hist_improving": hist_improving,
+        "macd_acceleration": macd_accelerating,
+        "rsi": rsi_now,
+        "volume_ratio": float(volume_ratio),
+        "bb_width": bb_width_now,
+        "bb_expanding": bb_expanding,
+        "breakout": breakout,
+        "bullish_structure": bullish_structure,
+        "strong_trend": strong_trend,
+        "reasons": reasons,
+    }
+
+
+def analyze_momentum_mtf(symbol, timeframes=("15m", "1h", "4h")):
+    results = {}
+
+    for tf in timeframes:
+        df = get_data_safe(symbol, tf, min_candles=150)
+        if df is None:
+            continue
+
+        result = calculate_momentum_score(df, tf)
+        if result:
+            results[tf] = result
+
+    if not results:
+        return None
+
+    weights = {"15m": 0.20, "1h": 0.30, "4h": 0.50}
+    weighted_score = 0.0
+    total_weight = 0.0
+
+    for tf, result in results.items():
+        weight = weights.get(tf, 0.30)
+        weighted_score += result["score"] * weight
+        total_weight += weight
+
+    final_score = weighted_score / total_weight if total_weight else 0
+
+    if final_score >= 8:
+        main_status = "🔥 STRONG MOMENTUM"
+    elif final_score >= 7:
+        main_status = "🟢 EARLY MOMENTUM"
+    elif final_score >= 5:
+        main_status = "🟡 DEVELOPING"
+    else:
+        main_status = "⚪ WAIT"
+
+    return {
+        "symbol": symbol,
+        "score": round(final_score, 2),
+        "status": main_status,
+        "timeframes": results,
+    }
+
+
+def scan_momentum(symbol):
+    result = analyze_momentum_mtf(symbol)
+    if result is None:
+        return None
+
+    tf = result["timeframes"]
+    return {
+        "Coin": symbol,
+        "Score": result["score"],
+        "Status": result["status"],
+        "4H": tf.get("4h", {}).get("score", 0),
+        "1H": tf.get("1h", {}).get("score", 0),
+        "15M": tf.get("15m", {}).get("score", 0),
+        "Volume 1H": tf.get("1h", {}).get("volume_ratio", 0),
+        "RSI 1H": tf.get("1h", {}).get("rsi", 0),
+        "Breakout 1H": tf.get("1h", {}).get("breakout", False),
+    }
 
 # =========================================================
 # ALGORITMA TRADING SPOT - MACD + STOCHASTIC RSI
@@ -931,8 +1143,8 @@ if not st.session_state.positions:
 # =========================================================
 # MAIN TITLE
 # =========================================================
-st.title("🤖 Crypto Bot PRO - SPOT Trading")
-st.caption("Multi Timeframe: 15M | 1H | 4H | MACD + Stochastic RSI + EMA100 | BUY & EXIT Only")
+st.title("🚀 Crypto Momentum Scanner PRO - SPOT")
+st.caption("Multi Timeframe: 15M | 1H | 4H | Momentum Score | WATCH Only")
 
 # =========================================================
 # SIDEBAR
@@ -971,7 +1183,7 @@ with st.sidebar:
                     st.error(f"❌ Gagal hapus {coin}!")
     
     st.divider()
-    st.subheader("📊 Trading Settings")
+    st.subheader("📊 Scanner Settings")
     refresh = st.slider("🔄 Refresh (detik)", 10, 60, 30)
     hold_minutes = st.slider("Hold Signal (menit)", 5, 30, 15, key="hold_minutes")
     
@@ -988,7 +1200,7 @@ with st.sidebar:
     st.metric("Total Signals", stats.get('total_signals', 0))
     st.metric("Open Positions", len(st.session_state.positions))
     st.caption(f"🔄 Auto Refresh: {refresh} detik")
-    st.caption("📌 Mode: SPOT (BUY & EXIT Only)")
+    st.caption("📌 Mode: SPOT Momentum Scanner (No Auto Entry)")
 
 # =========================================================
 # AUTO REFRESH
@@ -1002,206 +1214,91 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Scanner", "📈 Chart Analysis", "📋 Positions", "📜 History", "📊 Performance"
 ])
 
-# ==================== TAB 1: SCANNER ====================
- 
- 
-# ==================== TAB 1: SCANNER ====================
+
+# ==================== TAB 1: MOMENTUM SCANNER ====================
 with tab1:
-    st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
-    
-    all_signals = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    st.subheader("🚀 Momentum Scanner - SPOT")
+    st.caption("Scanner hanya mendeteksi momentum. Tidak otomatis membuka posisi.")
 
-    # Hapus pending signal yang kadaluarsa
-    current_time = datetime.now()
-    expired = []
-    for symbol, data in st.session_state.pending_signal.items():
-        elapsed = (current_time - data["time"]).seconds / 60
-        if elapsed > hold_minutes:
-            expired.append(symbol)
-    for sym in expired:
-        del st.session_state.pending_signal[sym]
+    all_momentum = []
+    coins = st.session_state.watchlist[:50]
 
-    for idx, symbol in enumerate(st.session_state.watchlist[:50]):
-        progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:50]))
-        status_text.text(f"🔄 Scanning {symbol}...")
-        
-        result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
-        
-        if result:
-            signal_data = {
-                "Coin": symbol,
-                "Signal": result["main_signal"],
-                "Strength": "⭐" * result.get("main_strength", 1),
-            }
-            
-            for tf in ["15m", "1h", "4h"]:
-                if tf in result["timeframes"]:
-                    res = result["timeframes"][tf]
-                    signal_data[f"{tf.upper()} Action"] = res["action"]
-                    signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
-                    signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
-                    signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
-                    signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
-                    signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
-                    signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
-            
-            all_signals.append(signal_data)
+    if coins:
+        progress = st.progress(0)
+        status_text = st.empty()
 
-            # Simpan pending signal jika sinyal BUY kuat
-            if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
-                df_5m = get_data_safe(symbol, "5m", min_candles=20)
-                if df_5m is not None:
-                    price = df_5m["Close"].iloc[-1]
-                    atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
-                    if pd.isna(atr) or atr == 0:
-                        atr = price * 0.01
-                    
-                    entry = price
-                    sl = entry - atr * 3
-                    tp = entry + atr * 7
-                    position_size = 1
+        for idx, symbol in enumerate(coins):
+            progress.progress((idx + 1) / len(coins))
+            status_text.text(f"🔍 Scanning {symbol}...")
 
-                    # CEK APAKAH SUDAH ADA POSISI DI DATABASE
-                    existing_positions = get_open_positions_from_db()
-                    existing_symbols = [p["symbol"] for p in existing_positions]
-                    
-                    if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
-                        # 1. Simpan ke pending
-                        st.session_state.pending_signal[symbol] = {
-                            "signal": result["main_signal"],
-                            "time": datetime.now(),
-                            "entry": entry,
-                            "sl": sl,
-                            "tp": tp,
-                            "timeframe": "5m"
-                        }
-                        
-                        # 2. 🔥 SIMPAN KE DATABASE
-                        saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
-                        if saved_pos:
-                            st.session_state.positions[symbol] = {
-                                "entry": entry,
-                                "sl": sl,
-                                "tp": tp,
-                                "entry_time": datetime.now(),
-                                "highest_price": entry,
-                                "id": saved_pos["id"],
-                                "position_size": position_size
-                            }
-                            st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
-                            
-                            # 3. Kirim telegram
-                            sent = send_telegram_once(symbol, result["main_signal"], result)
-                            if sent:
-                                save_signal({
-                                    'symbol': symbol,
-                                    'signal': result["main_signal"],
-                                    'entry_price': entry,
-                                    'stop_loss': sl,
-                                    'take_profit': tp,
-                                    'timestamp': datetime.now().isoformat()
-                                })
-                                stats = get_performance()
-                                stats['total_signals'] = stats.get('total_signals', 0) + 1
-                                update_performance(stats)
-                        else:
-                            # Hapus pending jika gagal
-                            del st.session_state.pending_signal[symbol]
-                            st.error(f"❌ Gagal membuka posisi untuk {symbol}")
-                    else:
-                        if symbol in existing_symbols:
-                            st.warning(f"⚠️ {symbol} already has an open position!")
-                        elif symbol in st.session_state.pending_signal:
-                            st.info(f"ℹ️ {symbol} has pending signal, waiting...")
-            
-            # Simpan sinyal EXIT
-            elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
-                sent = send_telegram_once(symbol, result["main_signal"], result)
-                if sent:
-                    save_signal({
-                        'symbol': symbol,
-                        'signal': result["main_signal"],
-                        'timestamp': datetime.now().isoformat()
-                    })
+            try:
+                result = scan_momentum(symbol)
+                if result:
+                    all_momentum.append(result)
+            except Exception as e:
+                print(f"Error scanning {symbol}: {e}")
 
-    progress_bar.empty()
-    status_text.empty()
+        progress.empty()
+        status_text.empty()
 
-    if all_signals:
-        df_signals = pd.DataFrame(all_signals)
-        st.dataframe(df_signals, use_container_width=True, hide_index=True)
-        
-        buy_signals = [s for s in all_signals if "BUY" in s["Signal"]]
-        if buy_signals:
-            best = buy_signals[0]
-            st.success(f"🏆 Best Buy Signal: **{best['Coin']}** | {best['Signal']}")
+    if all_momentum:
+        df_momentum = pd.DataFrame(all_momentum)
+        df_momentum = (
+            df_momentum.sort_values("Score", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        display_df = df_momentum.copy()
+        display_df["Score"] = display_df["Score"].map(lambda x: f"{x:.2f}/10")
+        display_df["Volume 1H"] = display_df["Volume 1H"].map(lambda x: f"{x:.2f}x")
+        display_df["RSI 1H"] = display_df["RSI 1H"].map(lambda x: f"{x:.1f}")
+
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        top = df_momentum.iloc[0]
+        st.success(
+            f"🏆 Top Momentum: **{top['Coin']}** | "
+            f"Score **{top['Score']:.2f}/10** | {top['Status']}"
+        )
+
+        with st.expander(f"🔎 Detail {top['Coin']}"):
+            detailed = analyze_momentum_mtf(top["Coin"])
+
+            if detailed:
+                for tf in ["4h", "1h", "15m"]:
+                    if tf not in detailed["timeframes"]:
+                        continue
+
+                    r = detailed["timeframes"][tf]
+                    st.markdown(
+                        f"### {tf.upper()} — {r['score']:.1f}/10 — {r['status']}"
+                    )
+
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Price", format_price(r["price"]))
+                    c2.metric("RSI", f"{r['rsi']:.1f}")
+                    c3.metric("Volume", f"{r['volume_ratio']:.2f}x")
+                    c4.metric(
+                        "BB",
+                        "Expanding" if r["bb_expanding"] else "Not expanding"
+                    )
+
+                    st.write(
+                        f"MACD: `{r['macd']:.6f}` | "
+                        f"Histogram: `{r['histogram']:.6f}`"
+                    )
+                    st.write(
+                        "Breakout 20 candle: "
+                        + ("✅ YES" if r["breakout"] else "❌ NO")
+                    )
+
+                    if r["reasons"]:
+                        st.write("**Reasons:**")
+                        for reason in r["reasons"]:
+                            st.write(f"- {reason}")
     else:
-        st.info("ℹ️ Tidak ada data")
+        st.info("ℹ️ Belum ada data momentum. Pastikan watchlist berisi coin yang valid.")
 
-    # ========== TAMPILAN PENDING SIGNALS ==========
-    if st.session_state.pending_signal:
-        st.divider()
-        st.subheader("⏳ Pending Signals - Entry, TP, SL")
-        st.caption("Sinyal BUY yang masih aktif menunggu eksekusi")
-        
-        pending_data = []
-        for symbol, data in st.session_state.pending_signal.items():
-            elapsed = (datetime.now() - data["time"]).seconds / 60
-            remaining = max(0, hold_minutes - elapsed)
-            entry = data.get("entry")
-            sl = data.get("sl")
-            tp = data.get("tp")
-            
-            if entry and sl and tp:
-                rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-            else:
-                rr = 0
-            
-            pending_data.append({
-                "Coin": symbol,
-                "Signal": data["signal"],
-                "Entry": format_price(entry),
-                "TP": format_price(tp),
-                "SL": format_price(sl),
-                "RR": f"{rr:.2f}",
-                "Time Left": f"{remaining:.0f}m",
-                "Timeframe": data.get("timeframe", "5m")
-            })
-        
-        if pending_data:
-            df_pending = pd.DataFrame(pending_data)
-            st.dataframe(df_pending, use_container_width=True, hide_index=True)
-        
-        # Card per coin
-        st.caption("Detail per coin:")
-        cols = st.columns(min(len(st.session_state.pending_signal), 4))
-        for idx, (symbol, data) in enumerate(st.session_state.pending_signal.items()):
-            col_idx = idx % len(cols)
-            with cols[col_idx]:
-                elapsed = (datetime.now() - data["time"]).seconds / 60
-                remaining = max(0, hold_minutes - elapsed)
-                entry = data.get("entry")
-                sl = data.get("sl")
-                tp = data.get("tp")
-                
-                if entry and sl and tp:
-                    rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-                else:
-                    rr = 0
-                
-                st.markdown(f"""
-                <div class="pending-signal">
-                    <b>{symbol}</b><br>
-                    {data['signal']}<br>
-                    📈 Entry: {format_price(entry)}<br>
-                    🎯 TP: {format_price(tp)}<br>
-                    🛑 SL: {format_price(sl)}<br>
-                    📊 RR: {rr:.2f}<br>
-                    ⏱️ {remaining:.0f}m remaining
-                </div>
-                """, unsafe_allow_html=True)
 # ==================== TAB 2: CHART ANALYSIS ====================
 with tab2:
     st.subheader("📈 Chart Analysis - SPOT")
@@ -1503,7 +1600,7 @@ with tab5:
 st.divider()
 st.caption(f"""
 🔄 Data dari Yahoo Finance | Timeframe: 15M, 1H, 4H  
-📊 Indikator: MACD + Stochastic RSI + EMA20 + EMA50 + EMA100 + Volume  
+📊 Indikator: MACD + Stochastic RSI + EMA20 + EMA50 + EMA100 + Volume + Bollinger Band  
 💾 Database: Supabase PostgreSQL  
 📌 Mode: SPOT (BUY & EXIT Only)
 """) 
