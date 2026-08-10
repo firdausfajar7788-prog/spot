@@ -1003,9 +1003,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==================== TAB 1: SCANNER ====================
- 
- 
-# ==================== TAB 1: SCANNER ====================
 with tab1:
     st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
     
@@ -1021,122 +1018,132 @@ with tab1:
         if elapsed > hold_minutes:
             expired.append(symbol)
     for sym in expired:
-        del st.session_state.pending_signal[sym]
+        if sym in st.session_state.pending_signal:
+            del st.session_state.pending_signal[sym]
 
-    for idx, symbol in enumerate(st.session_state.watchlist[:50]):
-        progress_bar.progress((idx + 1) / len(st.session_state.watchlist[:50]))
-        status_text.text(f"🔄 Scanning {symbol}...")
-        
-        result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
-        
-        if result:
-            signal_data = {
-                "Coin": symbol,
-                "Signal": result["main_signal"],
-                "Strength": "⭐" * result.get("main_strength", 1),
-            }
+    # LOOP SCAN COIN
+    coins_to_scan = st.session_state.watchlist[:50]
+    total_coins = len(coins_to_scan)
+    
+    for idx, symbol in enumerate(coins_to_scan):
+        try:
+            progress_bar.progress((idx + 1) / total_coins if total_coins > 0 else 0)
+            status_text.text(f"🔄 Scanning {symbol}... ({idx+1}/{total_coins})")
             
-            for tf in ["15m", "1h", "4h"]:
-                if tf in result["timeframes"]:
-                    res = result["timeframes"][tf]
-                    signal_data[f"{tf.upper()} Action"] = res["action"]
-                    signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
-                    signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
-                    signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
-                    signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
-                    signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
-                    signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
+            result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
             
-            all_signals.append(signal_data)
+            if result:
+                signal_data = {
+                    "Coin": symbol,
+                    "Signal": result["main_signal"],
+                    "Strength": "⭐" * result.get("main_strength", 1),
+                }
+                
+                for tf in ["15m", "1h", "4h"]:
+                    if tf in result["timeframes"]:
+                        res = result["timeframes"][tf]
+                        signal_data[f"{tf.upper()} Action"] = res["action"]
+                        signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
+                        signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
+                        signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
+                        signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
+                        signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
+                        signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
+                
+                all_signals.append(signal_data)
 
-            # Simpan pending signal jika sinyal BUY kuat
-            if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
-                df_5m = get_data_safe(symbol, "5m", min_candles=20)
-                if df_5m is not None:
-                    price = df_5m["Close"].iloc[-1]
-                    atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
-                    if pd.isna(atr) or atr == 0:
-                        atr = price * 0.01
-                    
-                    entry = price
-                    sl = entry - atr * 3
-                    tp = entry + atr * 7
-                    position_size = 1
-
-                    # CEK APAKAH SUDAH ADA POSISI DI DATABASE
-                    existing_positions = get_open_positions_from_db()
-                    existing_symbols = [p["symbol"] for p in existing_positions]
-                    
+                # ========== CEK POSISI DI DATABASE ==========
+                existing_positions = get_open_positions_from_db()
+                existing_symbols = [p["symbol"] for p in existing_positions]
+                
+                # ========== SIMPAN POSISI JIKA BUY ==========
+                if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
                     if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
-                        # 1. Simpan ke pending
-                        st.session_state.pending_signal[symbol] = {
-                            "signal": result["main_signal"],
-                            "time": datetime.now(),
-                            "entry": entry,
-                            "sl": sl,
-                            "tp": tp,
-                            "timeframe": "5m"
-                        }
-                        
-                        # 2. 🔥 SIMPAN KE DATABASE
-                        saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
-                        if saved_pos:
-                            st.session_state.positions[symbol] = {
+                        df_5m = get_data_safe(symbol, "5m", min_candles=20)
+                        if df_5m is not None:
+                            price = df_5m["Close"].iloc[-1]
+                            atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
+                            if pd.isna(atr) or atr == 0:
+                                atr = price * 0.01
+                            
+                            entry = price
+                            sl = entry - atr * 3
+                            tp = entry + atr * 7
+                            position_size = 1
+                            
+                            # Simpan ke pending
+                            st.session_state.pending_signal[symbol] = {
+                                "signal": result["main_signal"],
+                                "time": datetime.now(),
                                 "entry": entry,
                                 "sl": sl,
                                 "tp": tp,
-                                "entry_time": datetime.now(),
-                                "highest_price": entry,
-                                "id": saved_pos["id"],
-                                "position_size": position_size
+                                "timeframe": "5m"
                             }
-                            st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
                             
-                            # 3. Kirim telegram
-                            sent = send_telegram_once(symbol, result["main_signal"], result)
-                            if sent:
-                                save_signal({
-                                    'symbol': symbol,
-                                    'signal': result["main_signal"],
-                                    'entry_price': entry,
-                                    'stop_loss': sl,
-                                    'take_profit': tp,
-                                    'timestamp': datetime.now().isoformat()
-                                })
-                                stats = get_performance()
-                                stats['total_signals'] = stats.get('total_signals', 0) + 1
-                                update_performance(stats)
-                        else:
-                            # Hapus pending jika gagal
-                            del st.session_state.pending_signal[symbol]
-                            st.error(f"❌ Gagal membuka posisi untuk {symbol}")
-                    else:
-                        if symbol in existing_symbols:
-                            st.warning(f"⚠️ {symbol} already has an open position!")
-                        elif symbol in st.session_state.pending_signal:
-                            st.info(f"ℹ️ {symbol} has pending signal, waiting...")
-            
-            # Simpan sinyal EXIT
-            elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
-                sent = send_telegram_once(symbol, result["main_signal"], result)
-                if sent:
-                    save_signal({
-                        'symbol': symbol,
-                        'signal': result["main_signal"],
-                        'timestamp': datetime.now().isoformat()
-                    })
+                            # Simpan ke database
+                            saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
+                            if saved_pos:
+                                st.session_state.positions[symbol] = {
+                                    "entry": entry,
+                                    "sl": sl,
+                                    "tp": tp,
+                                    "entry_time": datetime.now(),
+                                    "highest_price": entry,
+                                    "id": saved_pos["id"],
+                                    "position_size": position_size
+                                }
+                                st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
+                                
+                                # Kirim telegram
+                                sent = send_telegram_once(symbol, result["main_signal"], result)
+                                if sent:
+                                    save_signal({
+                                        'symbol': symbol,
+                                        'signal': result["main_signal"],
+                                        'entry_price': entry,
+                                        'stop_loss': sl,
+                                        'take_profit': tp,
+                                        'timestamp': datetime.now().isoformat()
+                                    })
+                                    stats = get_performance()
+                                    stats['total_signals'] = stats.get('total_signals', 0) + 1
+                                    update_performance(stats)
+                            else:
+                                if symbol in st.session_state.pending_signal:
+                                    del st.session_state.pending_signal[symbol]
+                                st.error(f"❌ Gagal membuka posisi untuk {symbol}")
+                
+                # ========== SIMPAN EXIT ==========
+                elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
+                    sent = send_telegram_once(symbol, result["main_signal"], result)
+                    if sent:
+                        save_signal({
+                            'symbol': symbol,
+                            'signal': result["main_signal"],
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        
+        except Exception as e:
+            # Skip coin yang error, lanjut ke berikutnya
+            print(f"Error scanning {symbol}: {e}")
+            continue
 
     progress_bar.empty()
     status_text.empty()
 
+    # ========== TAMPILKAN HASIL ==========
     if all_signals:
         df_signals = pd.DataFrame(all_signals)
         st.dataframe(df_signals, use_container_width=True, hide_index=True)
         
+        # Best signal
         buy_signals = [s for s in all_signals if "BUY" in s["Signal"]]
         if buy_signals:
             best = buy_signals[0]
             st.success(f"🏆 Best Buy Signal: **{best['Coin']}** | {best['Signal']}")
+        else:
+            st.info("ℹ️ Tidak ada sinyal BUY saat ini")
     else:
         st.info("ℹ️ Tidak ada data")
 
@@ -1173,35 +1180,6 @@ with tab1:
         if pending_data:
             df_pending = pd.DataFrame(pending_data)
             st.dataframe(df_pending, use_container_width=True, hide_index=True)
-        
-        # Card per coin
-        st.caption("Detail per coin:")
-        cols = st.columns(min(len(st.session_state.pending_signal), 4))
-        for idx, (symbol, data) in enumerate(st.session_state.pending_signal.items()):
-            col_idx = idx % len(cols)
-            with cols[col_idx]:
-                elapsed = (datetime.now() - data["time"]).seconds / 60
-                remaining = max(0, hold_minutes - elapsed)
-                entry = data.get("entry")
-                sl = data.get("sl")
-                tp = data.get("tp")
-                
-                if entry and sl and tp:
-                    rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-                else:
-                    rr = 0
-                
-                st.markdown(f"""
-                <div class="pending-signal">
-                    <b>{symbol}</b><br>
-                    {data['signal']}<br>
-                    📈 Entry: {format_price(entry)}<br>
-                    🎯 TP: {format_price(tp)}<br>
-                    🛑 SL: {format_price(sl)}<br>
-                    📊 RR: {rr:.2f}<br>
-                    ⏱️ {remaining:.0f}m remaining
-                </div>
-                """, unsafe_allow_html=True)
 # ==================== TAB 2: CHART ANALYSIS ====================
 with tab2:
     st.subheader("📈 Chart Analysis - SPOT")
