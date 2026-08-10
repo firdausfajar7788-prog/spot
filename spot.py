@@ -974,7 +974,7 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📊 Trading Settings")
-    refresh = st.slider("🔄 Refresh (detik)", 10, 60, 30)
+    refresh = st.slider("🔄 Refresh (detik)", 15, 120, 30)
     hold_minutes = st.slider("Hold Signal (menit)", 5, 30, 15, key="hold_minutes")
     
     st.divider()
@@ -1008,138 +1008,146 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
     
-    all_signals = []
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    # Hapus pending signal yang kadaluarsa
-    current_time = datetime.now()
-    expired = []
-    for symbol, data in st.session_state.pending_signal.items():
-        elapsed = (current_time - data["time"]).seconds / 60
-        if elapsed > hold_minutes:
-            expired.append(symbol)
-    for sym in expired:
-        if sym in st.session_state.pending_signal:
-            del st.session_state.pending_signal[sym]
-
-    # LOOP SCAN COIN
-    coins_to_scan = st.session_state.watchlist[:50]
-    total_coins = len(coins_to_scan)
+    # ========== CEK APAKAH PERLU SCAN ==========
+    now = datetime.now()
+    time_since_scan = (now - st.session_state.get("last_scan", now)).seconds
     
-    for idx, symbol in enumerate(coins_to_scan):
-        try:
-            progress_bar.progress((idx + 1) / total_coins if total_coins > 0 else 0)
-            status_text.text(f"🔄 Scanning {symbol}... ({idx+1}/{total_coins})")
-            
-            result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
-            
-            if result:
-                signal_data = {
-                    "Coin": symbol,
-                    "Signal": result["main_signal"],
-                    "Strength": "⭐" * result.get("main_strength", 1),
-                }
-                
-                for tf in ["15m", "1h", "4h"]:
-                    if tf in result["timeframes"]:
-                        res = result["timeframes"][tf]
-                        signal_data[f"{tf.upper()} Action"] = res["action"]
-                        signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
-                        signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
-                        signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
-                        signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
-                        signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
-                        signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
-                
-                all_signals.append(signal_data)
+    # Hanya scan jika sudah lewat 30 detik
+    if time_since_scan > 30 or "last_scan" not in st.session_state:
+        st.session_state.last_scan = now
+        
+        all_signals = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-                # ========== CEK POSISI DI DATABASE ==========
-                existing_positions = get_open_positions_from_db()
-                existing_symbols = [p["symbol"] for p in existing_positions]
+        # Hapus pending signal yang kadaluarsa
+        current_time = datetime.now()
+        expired = []
+        for symbol, data in st.session_state.pending_signal.items():
+            elapsed = (current_time - data["time"]).seconds / 60
+            if elapsed > hold_minutes:
+                expired.append(symbol)
+        for sym in expired:
+            if sym in st.session_state.pending_signal:
+                del st.session_state.pending_signal[sym]
+
+        coins_to_scan = st.session_state.watchlist[:50]
+        total_coins = len(coins_to_scan)
+        
+        for idx, symbol in enumerate(coins_to_scan):
+            try:
+                progress_bar.progress((idx + 1) / total_coins if total_coins > 0 else 0)
+                status_text.text(f"🔄 Scanning {symbol}... ({idx+1}/{total_coins})")
                 
-                # ========== SIMPAN POSISI JIKA BUY ==========
-                if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
-                    if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
-                        df_5m = get_data_safe(symbol, "5m", min_candles=20)
-                        if df_5m is not None:
-                            price = df_5m["Close"].iloc[-1]
-                            atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
-                            if pd.isna(atr) or atr == 0:
-                                atr = price * 0.01
-                            
-                            entry = price
-                            sl = entry - atr * 3
-                            tp = entry + atr * 7
-                            position_size = 1
-                            
-                            # Simpan ke pending
-                            st.session_state.pending_signal[symbol] = {
-                                "signal": result["main_signal"],
-                                "time": datetime.now(),
-                                "entry": entry,
-                                "sl": sl,
-                                "tp": tp,
-                                "timeframe": "5m"
-                            }
-                            
-                            # Simpan ke database
-                            saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
-                            if saved_pos:
-                                st.session_state.positions[symbol] = {
+                result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
+                
+                if result:
+                    signal_data = {
+                        "Coin": symbol,
+                        "Signal": result["main_signal"],
+                        "Strength": "⭐" * result.get("main_strength", 1),
+                    }
+                    
+                    for tf in ["15m", "1h", "4h"]:
+                        if tf in result["timeframes"]:
+                            res = result["timeframes"][tf]
+                            signal_data[f"{tf.upper()} Action"] = res["action"]
+                            signal_data[f"{tf.upper()} MACD"] = f"{res['macd']['dif']:.4f}"
+                            signal_data[f"{tf.upper()} Hist"] = f"{res['macd']['histogram']:.4f}"
+                            signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
+                            signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
+                            signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
+                            signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
+                    
+                    all_signals.append(signal_data)
+
+                    # CEK POSISI DI DATABASE
+                    existing_positions = get_open_positions_from_db()
+                    existing_symbols = [p["symbol"] for p in existing_positions]
+                    
+                    # SIMPAN POSISI JIKA BUY
+                    if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
+                        if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
+                            df_5m = get_data_safe(symbol, "5m", min_candles=20)
+                            if df_5m is not None:
+                                price = df_5m["Close"].iloc[-1]
+                                atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
+                                if pd.isna(atr) or atr == 0:
+                                    atr = price * 0.01
+                                
+                                entry = price
+                                sl = entry - atr * 3
+                                tp = entry + atr * 7
+                                position_size = 1
+                                
+                                st.session_state.pending_signal[symbol] = {
+                                    "signal": result["main_signal"],
+                                    "time": datetime.now(),
                                     "entry": entry,
                                     "sl": sl,
                                     "tp": tp,
-                                    "entry_time": datetime.now(),
-                                    "highest_price": entry,
-                                    "id": saved_pos["id"],
-                                    "position_size": position_size
+                                    "timeframe": "5m"
                                 }
-                                st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
                                 
-                                # Kirim telegram
-                                sent = send_telegram_once(symbol, result["main_signal"], result)
-                                if sent:
-                                    save_signal({
-                                        'symbol': symbol,
-                                        'signal': result["main_signal"],
-                                        'entry_price': entry,
-                                        'stop_loss': sl,
-                                        'take_profit': tp,
-                                        'timestamp': datetime.now().isoformat()
-                                    })
-                                    stats = get_performance()
-                                    stats['total_signals'] = stats.get('total_signals', 0) + 1
-                                    update_performance(stats)
-                            else:
-                                if symbol in st.session_state.pending_signal:
-                                    del st.session_state.pending_signal[symbol]
-                                st.error(f"❌ Gagal membuka posisi untuk {symbol}")
-                
-                # ========== SIMPAN EXIT ==========
-                elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
-                    sent = send_telegram_once(symbol, result["main_signal"], result)
-                    if sent:
-                        save_signal({
-                            'symbol': symbol,
-                            'signal': result["main_signal"],
-                            'timestamp': datetime.now().isoformat()
-                        })
-                        
-        except Exception as e:
-            # Skip coin yang error, lanjut ke berikutnya
-            print(f"Error scanning {symbol}: {e}")
-            continue
+                                saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
+                                if saved_pos:
+                                    st.session_state.positions[symbol] = {
+                                        "entry": entry,
+                                        "sl": sl,
+                                        "tp": tp,
+                                        "entry_time": datetime.now(),
+                                        "highest_price": entry,
+                                        "id": saved_pos["id"],
+                                        "position_size": position_size
+                                    }
+                                    st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
+                                    
+                                    sent = send_telegram_once(symbol, result["main_signal"], result)
+                                    if sent:
+                                        save_signal({
+                                            'symbol': symbol,
+                                            'signal': result["main_signal"],
+                                            'entry_price': entry,
+                                            'stop_loss': sl,
+                                            'take_profit': tp,
+                                            'timestamp': datetime.now().isoformat()
+                                        })
+                                        stats = get_performance()
+                                        stats['total_signals'] = stats.get('total_signals', 0) + 1
+                                        update_performance(stats)
+                                else:
+                                    if symbol in st.session_state.pending_signal:
+                                        del st.session_state.pending_signal[symbol]
+                                    st.error(f"❌ Gagal membuka posisi untuk {symbol}")
+                    
+                    # SIMPAN EXIT
+                    elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
+                        sent = send_telegram_once(symbol, result["main_signal"], result)
+                        if sent:
+                            save_signal({
+                                'symbol': symbol,
+                                'signal': result["main_signal"],
+                                'timestamp': datetime.now().isoformat()
+                            })
+                            
+            except Exception as e:
+                print(f"Error scanning {symbol}: {e}")
+                continue
 
-    progress_bar.empty()
-    status_text.empty()
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Simpan hasil scan ke session state
+        st.session_state.scan_results = all_signals
+    else:
+        # Gunakan hasil scan sebelumnya
+        all_signals = st.session_state.get("scan_results", [])
 
     # ========== TAMPILKAN HASIL ==========
     if all_signals:
         df_signals = pd.DataFrame(all_signals)
         st.dataframe(df_signals, use_container_width=True, hide_index=True)
         
-        # Best signal
         buy_signals = [s for s in all_signals if "BUY" in s["Signal"]]
         if buy_signals:
             best = buy_signals[0]
@@ -1229,212 +1237,186 @@ with tab2:
         else:
             st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
-# ==================== TAB 3: POSITIONS (DATABASE VERSION) ====================
+# ==================== TAB 3: POSITIONS ====================
 with tab3:
-    st.subheader("📊 Portfolio Management")
+    st.subheader("📋 Open Positions - SPOT")
     
-    # ========== AMBIL DATA DARI DATABASE ==========
-    portfolio_data = get_portfolio_summary()
-    open_positions = portfolio_data["open_positions"]
-    closed_positions = portfolio_data["closed_positions"]
+    # ========== CEK APAKAH PERLU UPDATE ==========
+    now = datetime.now()
+    time_since_refresh = (now - st.session_state.last_refresh).seconds
     
-    # ========== UPDATE POSISI YANG SEDANG BERJALAN ==========
-    for pos in open_positions:
-        try:
-            symbol = pos["symbol"]
-            position_id = pos["id"]
-            entry = pos["entry_price"]
-            sl = pos["stop_loss"]
-            tp = pos["take_profit"]
-            position_size = pos.get("position_size", 1)
-            
-            # Ambil harga terkini
-            df = get_data_safe(symbol, "15m", min_candles=20)
-            if df is not None and not df.empty:
-                current_price = df["Close"].iloc[-1]
+    # Hanya update jika sudah lewat 30 detik atau positions kosong
+    if time_since_refresh > 30 or not st.session_state.positions:
+        st.session_state.last_refresh = now
+        st.session_state.is_processing = True
+        
+        # ========== UPDATE POSISI ==========
+        updated_positions = {}
+        positions_to_remove = []
+        
+        for symbol, pos in st.session_state.positions.items():
+            try:
+                df = get_data_safe(symbol, "15m", min_candles=20)
+                if df is None or df.empty:
+                    updated_positions[symbol] = pos
+                    continue
                 
-                # Update highest price untuk trailing stop
-                highest = pos.get("highest_price", entry)
+                current_price = df["Close"].iloc[-1]
+                highest = pos.get("highest_price", pos["entry"])
                 if current_price > highest:
                     highest = current_price
                 
-                # Hitung PNL
-                pnl = (current_price - entry) * position_size
-                pnl_percent = (current_price / entry - 1) * 100
+                entry_time = pos.get("entry_time")
+                if isinstance(entry_time, str):
+                    try:
+                        entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                    except:
+                        try:
+                            entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                        except:
+                            entry_time = datetime.now()
+                elif entry_time is None:
+                    entry_time = datetime.now()
                 
-                # Update di database
-                update_position_in_db(position_id, {
-                    "current_price": current_price,
-                    "highest_price": highest,
-                    "pnl": pnl,
-                    "pnl_percent": pnl_percent
-                })
+                position_for_exit = {
+                    "entry": pos["entry"],
+                    "sl": pos.get("sl"),
+                    "tp": pos.get("tp"),
+                    "entry_time": entry_time
+                }
                 
-                # Cek kondisi exit
                 exit_signal, exit_price = check_exit_conditions(
-                    {"entry": entry, "sl": sl, "tp": tp, "entry_time": pos.get("entry_time")}, 
+                    position_for_exit, 
                     df, 
                     highest
                 )
                 
-                # Auto exit jika ada sinyal
+                pos["current_price"] = current_price
+                pos["highest_price"] = highest
+                
                 if exit_signal:
-                    pnl_exit = (exit_price - entry) * position_size
-                    pnl_percent_exit = (exit_price / entry - 1) * 100
-                    
-                    # Close di database
-                    close_position_in_db(position_id, exit_price, exit_signal, pnl_exit, pnl_percent_exit)
-                    
-                    # Simpan ke signal_history
                     save_signal({
                         'symbol': symbol,
                         'signal': f"EXIT - {exit_signal}",
                         'exit_price': exit_price,
-                        'profit_pct': pnl_percent_exit,
+                        'profit_pct': (exit_price/pos['entry'] - 1) * 100,
                         'timestamp': datetime.now().isoformat()
                     })
+                    positions_to_remove.append(symbol)
+                    st.success(f"✅ {symbol} closed: {exit_signal} at ${exit_price:.4f}")
+                else:
+                    updated_positions[symbol] = pos
                     
-                    # Hapus dari session state
-                    if symbol in st.session_state.positions:
-                        del st.session_state.positions[symbol]
-                    
-                    st.rerun()
-        except Exception as e:
-            print(f"Error updating {pos.get('symbol', 'unknown')}: {e}")
-            continue
-    
-    # ========== REFRESH DATA ==========
-    portfolio_data = get_portfolio_summary()
-    open_positions = portfolio_data["open_positions"]
-    closed_positions = portfolio_data["closed_positions"]
-    
-    # ========== PORTFOLIO SUMMARY (WALLET STYLE) ==========
-    st.subheader("💰 Portfolio Summary")
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    # Total Equity
-    total_equity = portfolio_data["total_equity"]
-    total_pnl = portfolio_data["total_pnl"]
-    
-    col1.metric(
-        "📊 Total Equity", 
-        f"${total_equity:,.2f}",
-        delta=f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
-    )
-    
-    col2.metric(
-        "📈 Realized PNL",
-        f"${portfolio_data['realized_pnl']:,.2f}",
-        delta=f"{portfolio_data['win_rate']:.1f}% Win Rate"
-    )
-    
-    col3.metric(
-        "📉 Unrealized PNL",
-        f"${portfolio_data['unrealized_pnl']:,.2f}",
-        delta=f"{portfolio_data['unrealized_pnl_percent']:.2f}%"
-    )
-    
-    col4.metric(
-        "🔄 Total PNL",
-        f"${total_pnl:,.2f}",
-        delta=f"{(total_pnl/max(1, total_equity) * 100):.2f}%"
-    )
-    
-    col5.metric(
-        "🎯 Win Rate",
-        f"{portfolio_data['win_rate']:.1f}%",
-        delta=f"{portfolio_data['wins']}W / {portfolio_data['losses']}L"
-    )
-    
-    st.divider()
-    
-    # ========== OPEN POSITIONS ==========
-    st.subheader("📋 Open Positions")
-    
-    if open_positions:
-        pos_data = []
-        for pos in open_positions:
-            pnl = pos.get("pnl", 0)
-            pnl_percent = pos.get("pnl_percent", 0)
-            
-            if pnl > 0:
-                pnl_color = "🟢"
-            elif pnl < 0:
-                pnl_color = "🔴"
-            else:
-                pnl_color = "🟡"
-            
-            entry_time = pos.get("entry_time", "")
-            if entry_time and isinstance(entry_time, str):
-                try:
-                    entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
-                except:
-                    entry_time = entry_time[:16] if len(entry_time) > 16 else entry_time
-            
-            pos_data.append({
-                "Coin": pos["symbol"],
-                "Entry": format_price(pos["entry_price"]),
-                "Current": format_price(pos.get("current_price", pos["entry_price"])),
-                "SL": format_price(pos["stop_loss"]),
-                "TP": format_price(pos["take_profit"]),
-                "Size": f"{pos.get('position_size', 1):.4f}",
-                "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
-                "Entry Time": entry_time
-            })
+            except Exception as e:
+                updated_positions[symbol] = pos
+                print(f"Error updating {symbol}: {e}")
         
-        df_open = pd.DataFrame(pos_data)
-        st.dataframe(df_open, use_container_width=True, hide_index=True)
+        # Hapus posisi yang sudah exit
+        for symbol in positions_to_remove:
+            if symbol in st.session_state.positions:
+                del st.session_state.positions[symbol]
+        
+        # Update session state
+        st.session_state.positions = updated_positions
+        st.session_state.is_processing = False
+    
+    # ========== TAMPILKAN OPEN POSITIONS ==========
+    if st.session_state.positions:
+        pos_data = []
+        for symbol, pos in st.session_state.positions.items():
+            try:
+                current_price = pos.get("current_price", pos["entry"])
+                pnl_percent = (current_price / pos['entry'] - 1) * 100
+                
+                if pnl_percent > 0:
+                    pnl_color = "🟢"
+                elif pnl_percent < 0:
+                    pnl_color = "🔴"
+                else:
+                    pnl_color = "🟡"
+                
+                entry_time = pos.get("entry_time")
+                if isinstance(entry_time, datetime):
+                    entry_time_str = entry_time.strftime("%Y-%m-%d %H:%M")
+                else:
+                    entry_time_str = str(entry_time)[:16] if entry_time else ""
+                
+                pos_data.append({
+                    "Coin": symbol,
+                    "Entry": format_price(pos.get("entry")),
+                    "Current": format_price(current_price),
+                    "SL": format_price(pos.get("sl")),
+                    "TP": format_price(pos.get("tp")),
+                    "PNL": f"{pnl_color} {pnl_percent:.2f}%",
+                    "Entry Time": entry_time_str
+                })
+            except Exception as e:
+                continue
+        
+        if pos_data:
+            df_pos = pd.DataFrame(pos_data)
+            st.dataframe(df_pos, use_container_width=True, hide_index=True)
+            
+            # ========== SUMMARY STATISTICS ==========
+            st.divider()
+            st.subheader("📊 Portfolio Summary")
+            
+            total_positions = len(pos_data)
+            total_profit = 0
+            winning_positions = 0
+            losing_positions = 0
+            
+            for p in pos_data:
+                pnl_str = p["PNL"].replace("🟢", "").replace("🔴", "").replace("🟡", "").replace("%", "").strip()
+                try:
+                    profit = float(pnl_str)
+                    total_profit += profit
+                    if profit > 0:
+                        winning_positions += 1
+                    elif profit < 0:
+                        losing_positions += 1
+                except:
+                    pass
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Positions", total_positions)
+            col2.metric("Winning", winning_positions)
+            col3.metric("Losing", losing_positions)
+            col4.metric("Total PNL", f"{total_profit:.2f}%")
     else:
         st.info("📭 Tidak ada posisi terbuka")
     
     st.divider()
-    
-    # ========== CLOSED POSITIONS ==========
     st.subheader("📊 Closed Positions")
     
-    if closed_positions:
-        closed_data = []
-        for pos in closed_positions[:50]:
-            pnl = pos.get("pnl", 0)
-            pnl_percent = pos.get("pnl_percent", 0)
-            
-            if pnl > 0:
-                pnl_color = "🟢"
-            elif pnl < 0:
-                pnl_color = "🔴"
-            else:
-                pnl_color = "🟡"
-            
-            exit_reason = pos.get("exit_reason", "UNKNOWN")
-            exit_emoji = "✅" if "TP" in exit_reason else "❌" if "SL" in exit_reason else "🔄"
-            
-            exit_time = pos.get("exit_time", "")
-            if exit_time and isinstance(exit_time, str):
-                try:
-                    exit_time = datetime.fromisoformat(exit_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
-                except:
-                    exit_time = exit_time[:16] if len(exit_time) > 16 else exit_time
-            
-            closed_data.append({
-                "Coin": pos["symbol"],
-                "Entry": format_price(pos["entry_price"]),
-                "Exit": format_price(pos.get("exit_price", pos["entry_price"])),
-                "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
-                "Exit Reason": f"{exit_emoji} {exit_reason}",
-                "Exit Time": exit_time
-            })
+    history = get_signal_history(limit=50)
+    closed = [h for h in history if "EXIT" in h.get("signal", "") or "CLOSED" in h.get("signal", "")]
+    if closed:
+        df_closed = pd.DataFrame(closed)
+        if 'id' in df_closed.columns:
+            df_closed = df_closed.drop('id', axis=1)
         
-        df_closed = pd.DataFrame(closed_data)
+        if 'profit_pct' in df_closed.columns:
+            df_closed['PNL'] = df_closed['profit_pct'].apply(
+                lambda x: f"🟢 {x:.2f}%" if x > 0 else f"🔴 {x:.2f}%" if x < 0 else f"🟡 {x:.2f}%"
+            )
+        
         st.dataframe(df_closed, use_container_width=True, hide_index=True)
         
-        # Closed Summary
-        st.divider()
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Trades", portfolio_data["total_closed"])
-        col2.metric("Wins", portfolio_data["wins"])
-        col3.metric("Losses", portfolio_data["losses"])
-        col4.metric("Win Rate", f"{portfolio_data['win_rate']:.1f}%")
+        if 'profit_pct' in df_closed.columns:
+            total_closed = len(df_closed)
+            total_profit_closed = df_closed['profit_pct'].sum()
+            wins = len(df_closed[df_closed['profit_pct'] > 0])
+            losses = len(df_closed[df_closed['profit_pct'] < 0])
+            win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+            
+            st.divider()
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric("Total Closed", total_closed)
+            col2.metric("Wins", wins)
+            col3.metric("Losses", losses)
+            col4.metric("Win Rate", f"{win_rate:.1f}%")
+            col5.metric("Total PNL", f"{total_profit_closed:.2f}%")
     else:
         st.info("Belum ada posisi yang ditutup")
         # ==================== TAB 4: HISTORY ====================
