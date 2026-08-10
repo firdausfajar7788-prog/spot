@@ -1250,17 +1250,17 @@ with tab2:
             st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
 # ==================== TAB 3: POSITIONS ====================
+# ==================== TAB 3: POSITIONS ====================
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
     # ========== CEK APAKAH PERLU UPDATE ==========
     now = datetime.now()
-    time_since_refresh = (now - st.session_state.last_refresh).seconds
+    time_since_refresh = (now - st.session_state.get("last_refresh", now)).seconds
     
     # Hanya update jika sudah lewat 30 detik atau positions kosong
     if time_since_refresh > 30 or not st.session_state.positions:
         st.session_state.last_refresh = now
-        st.session_state.is_processing = True
         
         # ========== UPDATE POSISI ==========
         updated_positions = {}
@@ -1307,11 +1307,20 @@ with tab3:
                 pos["highest_price"] = highest
                 
                 if exit_signal:
+                    # Hitung PNL
+                    pnl = (exit_price - pos["entry"]) * pos.get("position_size", 1)
+                    pnl_percent = (exit_price / pos["entry"] - 1) * 100
+                    
+                    # ========== UPDATE KE DATABASE ==========
+                    position_id = pos.get("id")
+                    if position_id:
+                        close_position_in_db(position_id, exit_price, exit_signal, pnl, pnl_percent)
+                    
                     save_signal({
                         'symbol': symbol,
                         'signal': f"EXIT - {exit_signal}",
                         'exit_price': exit_price,
-                        'profit_pct': (exit_price/pos['entry'] - 1) * 100,
+                        'profit_pct': pnl_percent,
                         'timestamp': datetime.now().isoformat()
                     })
                     positions_to_remove.append(symbol)
@@ -1328,9 +1337,7 @@ with tab3:
             if symbol in st.session_state.positions:
                 del st.session_state.positions[symbol]
         
-        # Update session state
         st.session_state.positions = updated_positions
-        st.session_state.is_processing = False
     
     # ========== TAMPILKAN OPEN POSITIONS ==========
     if st.session_state.positions:
@@ -1339,10 +1346,11 @@ with tab3:
             try:
                 current_price = pos.get("current_price", pos["entry"])
                 pnl_percent = (current_price / pos['entry'] - 1) * 100
+                pnl = (current_price - pos['entry']) * pos.get("position_size", 1)
                 
-                if pnl_percent > 0:
+                if pnl > 0:
                     pnl_color = "🟢"
-                elif pnl_percent < 0:
+                elif pnl < 0:
                     pnl_color = "🔴"
                 else:
                     pnl_color = "🟡"
@@ -1359,7 +1367,8 @@ with tab3:
                     "Current": format_price(current_price),
                     "SL": format_price(pos.get("sl")),
                     "TP": format_price(pos.get("tp")),
-                    "PNL": f"{pnl_color} {pnl_percent:.2f}%",
+                    "Size": f"{pos.get('position_size', 1):.4f}",
+                    "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
                     "Entry Time": entry_time_str
                 })
             except Exception as e:
@@ -1379,14 +1388,17 @@ with tab3:
             losing_positions = 0
             
             for p in pos_data:
-                pnl_str = p["PNL"].replace("🟢", "").replace("🔴", "").replace("🟡", "").replace("%", "").strip()
+                pnl_str = p["PNL"].replace("🟢", "").replace("🔴", "").replace("🟡", "").replace("$", "").replace("(", "").replace(")", "").replace("%", "").strip()
                 try:
-                    profit = float(pnl_str)
-                    total_profit += profit
-                    if profit > 0:
-                        winning_positions += 1
-                    elif profit < 0:
-                        losing_positions += 1
+                    # Ambil angka pertama sebelum spasi
+                    parts = pnl_str.split()
+                    if parts:
+                        profit = float(parts[0])
+                        total_profit += profit
+                        if profit > 0:
+                            winning_positions += 1
+                        elif profit < 0:
+                            losing_positions += 1
                 except:
                     pass
             
@@ -1394,41 +1406,84 @@ with tab3:
             col1.metric("Total Positions", total_positions)
             col2.metric("Winning", winning_positions)
             col3.metric("Losing", losing_positions)
-            col4.metric("Total PNL", f"{total_profit:.2f}%")
+            col4.metric("Total PNL", f"${total_profit:.2f}")
     else:
         st.info("📭 Tidak ada posisi terbuka")
     
     st.divider()
+    
+    # ========== CLOSED POSITIONS (DARI DATABASE) ==========
     st.subheader("📊 Closed Positions")
     
-    history = get_signal_history(limit=50)
-    closed = [h for h in history if "EXIT" in h.get("signal", "") or "CLOSED" in h.get("signal", "")]
-    if closed:
-        df_closed = pd.DataFrame(closed)
-        if 'id' in df_closed.columns:
-            df_closed = df_closed.drop('id', axis=1)
+    # ========== AMBIL DARI DATABASE ==========
+    closed_positions = get_closed_positions_from_db(limit=100)
+    
+    if closed_positions:
+        closed_data = []
+        total_profit_closed = 0
+        wins = 0
+        losses = 0
         
-        if 'profit_pct' in df_closed.columns:
-            df_closed['PNL'] = df_closed['profit_pct'].apply(
-                lambda x: f"🟢 {x:.2f}%" if x > 0 else f"🔴 {x:.2f}%" if x < 0 else f"🟡 {x:.2f}%"
-            )
+        for pos in closed_positions:
+            try:
+                pnl = pos.get("pnl", 0)
+                pnl_percent = pos.get("pnl_percent", 0)
+                
+                if pnl > 0:
+                    pnl_color = "🟢"
+                    wins += 1
+                elif pnl < 0:
+                    pnl_color = "🔴"
+                    losses += 1
+                else:
+                    pnl_color = "🟡"
+                
+                total_profit_closed += pnl
+                
+                exit_reason = pos.get("exit_reason", "UNKNOWN")
+                exit_emoji = "✅" if "TP" in exit_reason else "❌" if "SL" in exit_reason else "🔄"
+                
+                entry_time = pos.get("entry_time", "")
+                if entry_time and isinstance(entry_time, str):
+                    try:
+                        entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
+                    except:
+                        entry_time = entry_time[:16] if len(entry_time) > 16 else entry_time
+                
+                exit_time = pos.get("exit_time", "")
+                if exit_time and isinstance(exit_time, str):
+                    try:
+                        exit_time = datetime.fromisoformat(exit_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
+                    except:
+                        exit_time = exit_time[:16] if len(exit_time) > 16 else exit_time
+                
+                closed_data.append({
+                    "Coin": pos["symbol"],
+                    "Entry": format_price(pos["entry_price"]),
+                    "Exit": format_price(pos.get("exit_price", pos["entry_price"])),
+                    "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
+                    "Exit Reason": f"{exit_emoji} {exit_reason}",
+                    "Entry Time": entry_time,
+                    "Exit Time": exit_time
+                })
+            except Exception as e:
+                continue
         
-        st.dataframe(df_closed, use_container_width=True, hide_index=True)
-        
-        if 'profit_pct' in df_closed.columns:
-            total_closed = len(df_closed)
-            total_profit_closed = df_closed['profit_pct'].sum()
-            wins = len(df_closed[df_closed['profit_pct'] > 0])
-            losses = len(df_closed[df_closed['profit_pct'] < 0])
-            win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+        if closed_data:
+            df_closed = pd.DataFrame(closed_data)
+            st.dataframe(df_closed, use_container_width=True, hide_index=True)
             
+            # ========== CLOSED POSITIONS SUMMARY ==========
             st.divider()
             col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Total Closed", total_closed)
+            total_closed = len(closed_data)
+            win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+            
+            col1.metric("Total Trades", total_closed)
             col2.metric("Wins", wins)
             col3.metric("Losses", losses)
             col4.metric("Win Rate", f"{win_rate:.1f}%")
-            col5.metric("Total PNL", f"{total_profit_closed:.2f}%")
+            col5.metric("Total PNL", f"${total_profit_closed:.2f}")
     else:
         st.info("Belum ada posisi yang ditutup")
         # ==================== TAB 4: HISTORY ====================
