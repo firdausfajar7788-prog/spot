@@ -901,7 +901,7 @@ def check_exit_conditions(position, df, highest_price=None):
     return None, price
 
 # =========================================================
-# INITIALIZATION - LOAD POSITIONS FROM DATABASE
+# INITIALIZATION
 # =========================================================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = get_watchlist()
@@ -912,23 +912,35 @@ if "signal_history" not in st.session_state:
 if "performance_stats" not in st.session_state:
     st.session_state.performance_stats = get_performance()
 
-# 🔥 LOAD POSITIONS DARI DATABASE
 if "positions" not in st.session_state:
     st.session_state.positions = {}
 
-# Jika positions kosong, load dari database
+# 🔥 TAMBAHKAN INI UNTUK KONTROL REFRESH
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = datetime.now()
+if "last_scan" not in st.session_state:
+    st.session_state.last_scan = datetime.now()
+if "is_processing" not in st.session_state:
+    st.session_state.is_processing = False
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = []
+
+# 🔥 LOAD POSITIONS DARI DATABASE
 if not st.session_state.positions:
-    db_positions = get_open_positions_from_db()
-    for pos in db_positions:
-        st.session_state.positions[pos["symbol"]] = {
-            "entry": pos["entry_price"],
-            "sl": pos["stop_loss"],
-            "tp": pos["take_profit"],
-            "entry_time": datetime.fromisoformat(pos["entry_time"]) if pos.get("entry_time") else datetime.now(),
-            "highest_price": pos.get("highest_price", pos["entry_price"]),
-            "id": pos["id"],
-            "position_size": pos.get("position_size", 1)
-        }
+    try:
+        db_positions = get_open_positions_from_db()
+        for pos in db_positions:
+            st.session_state.positions[pos["symbol"]] = {
+                "entry": pos["entry_price"],
+                "sl": pos["stop_loss"],
+                "tp": pos["take_profit"],
+                "entry_time": datetime.fromisoformat(pos["entry_time"]) if pos.get("entry_time") else datetime.now(),
+                "highest_price": pos.get("highest_price", pos["entry_price"]),
+                "id": pos["id"],
+                "position_size": pos.get("position_size", 1)
+            }
+    except:
+        pass
 
 # =========================================================
 # MAIN TITLE
