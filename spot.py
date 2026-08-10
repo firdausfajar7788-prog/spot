@@ -729,19 +729,21 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         "strong_bullish": strong_bullish
     }
 
-# =========================================================
-# MULTI TIMEFRAME ANALYSIS - SPOT
-# =========================================================
 def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     """Analisis multi timeframe untuk SPOT - 3 dari 3 bullish"""
     results = {}
+    
     for tf in timeframes:
-        df = get_data_safe(symbol, tf, min_candles=50)
-        if df is not None:
-            result = analyze_macd_stoch_spot(df, tf)
-            if result:
-                result["symbol"] = symbol
-                results[tf] = result
+        try:
+            df = get_data_safe(symbol, tf, min_candles=50)
+            if df is not None:
+                result = analyze_macd_stoch_spot(df, tf)
+                if result:
+                    result["symbol"] = symbol
+                    results[tf] = result
+        except Exception as e:
+            print(f"Error getting data for {symbol} {tf}: {e}")
+            continue
     
     if not results:
         return None
@@ -764,7 +766,6 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     main_signal = "⏳ WAIT"
     main_strength = 0
     
-    # Spot: butuh 3 dari 3 bullish
     if buy_count >= 3:
         main_signal = "🟢 STRONG BUY (All TF Bullish)"
         main_strength = 3
@@ -789,6 +790,7 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     combined["buy_count"] = buy_count
     combined["sell_count"] = sell_count
     combined["hold_count"] = hold_count
+    combined["total_score"] = 50 + (buy_count * 10)  # Tambahan untuk score
     
     return combined
 
