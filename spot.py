@@ -10,7 +10,9 @@ import os
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 from supabase import create_client, Client
-from ta.volatility import AverageTrueRange
+ 
+from ta.volatility import AverageTrueRange, BollingerBands
+from ta.trend import ADXIndicator
 
 load_dotenv()
 warnings.filterwarnings('ignore')
@@ -646,32 +648,13 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     """Versi SPOT - hanya BUY dan EXIT (tanpa SELL)"""
     if df is None or len(df) < 30:
         return None
-
-        # ========== TAMBAHKAN DETEKSI WHIPSAW ==========
-    whipsaw = detect_whipsaw(df, lookback=20, buffer_pct=0.5)
     
-    # ========== MODIFIKASI KEPUTUSAN ==========
-    # Jika whipsaw terdeteksi, jangan entry
-    if whipsaw["is_whipsaw"]:
-        buy_score = max(0, buy_score - 3)  # Kurangi buy score
-        exit_score = max(0, exit_score - 1)
-        reasons.append(f"⚠️ {whipsaw['status']}")
-        
-        # Jika false breakout, arah sebaliknya
-        if "FAKE_BREAKOUT_UP" in whipsaw["direction"]:
-            # False breakout up = harga akan turun
-            sell_score += 2
-            reasons.append("🔴 Fake breakout up, bias bearish")
-        elif "FAKE_BREAKOUT_DOWN" in whipsaw["direction"]:
-            # False breakout down = harga akan naik
-            buy_score += 1
-            reasons.append("🟢 Fake breakout down, bias bullish")
-    
+    # ========== HITUNG INDIKATOR DULU ==========
     macd_line, signal_line, histogram = MACD(df)
     stoch_k, stoch_d, rsi = StochasticRSI(df)
     ema20 = EMA(df, 20)
     ema50 = EMA(df, 50)
-    ema100 = EMA(df, 100)  # Tambahan untuk spot
+    ema100 = EMA(df, 100)
     
     last = df.iloc[-1]
     price = last["Close"]
@@ -708,20 +691,18 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     hist_decreasing = hist_val < hist_prev
     hist_positive = hist_val > 0
     
-    # Trend untuk spot (lebih ketat dengan EMA100)
     strong_bullish = price > ema20_val > ema50_val > ema100_val
     bullish_trend = price > ema20_val > ema50_val
     bearish_trend = price < ema20_val < ema50_val
     
-    volume_confirmed = volume_ratio > 1.5  # Lebih ketat untuk spot
+    volume_confirmed = volume_ratio > 1.5
     
     # =========================================================
-    # BUY SCORE (Lebih ketat)
+    # BUY SCORE
     # =========================================================
     buy_score = 0
     buy_reasons = []
     
-    # 1. MACD (minimal 3 poin)
     if macd_val > signal_val:
         buy_score += 1
         buy_reasons.append("MACD DIF > DEA ✅")
@@ -735,7 +716,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         buy_score += 1
         buy_reasons.append("Histogram menguat ✅")
     
-    # 2. Stoch RSI (minimal 3 poin)
     if stoch_k_val < 20 and stoch_d_val < 20:
         buy_score += 2
         buy_reasons.append("⭐ Stoch Oversold (<20)")
@@ -749,7 +729,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         buy_score += 0.5
         buy_reasons.append("Stoch K > D ✅")
     
-    # 3. Trend (minimal 2 poin)
     if strong_bullish:
         buy_score += 2
         buy_reasons.append("⭐ Strong Bullish (EMA100+)")
@@ -760,12 +739,10 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         buy_score += 0.5
         buy_reasons.append("Harga > EMA20 ✅")
     
-    # 4. Volume (1 poin)
     if volume_confirmed:
         buy_score += 1
         buy_reasons.append("Volume tinggi ✅")
     
-    # 5. RSI ideal (1 poin)
     if 30 <= rsi_val <= 60:
         buy_score += 1
         buy_reasons.append(f"RSI ideal ({rsi_val:.1f}) ✅")
@@ -774,12 +751,11 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         buy_reasons.append(f"RSI sehat ({rsi_val:.1f}) ✅")
     
     # =========================================================
-    # EXIT SCORE (Untuk close position)
+    # EXIT SCORE
     # =========================================================
     exit_score = 0
     exit_reasons = []
     
-    # 1. MACD Bearish
     if macd_val < signal_val:
         exit_score += 1
         exit_reasons.append("MACD DIF < DEA ⚠️")
@@ -790,7 +766,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         exit_score += 2
         exit_reasons.append("⭐ MACD Death Cross!")
     
-    # 2. Stoch Overbought
     if stoch_k_val > 80 and stoch_d_val > 80:
         exit_score += 2
         exit_reasons.append("⭐ Stoch Overbought (>80)")
@@ -798,15 +773,28 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         exit_score += 2
         exit_reasons.append("⭐ Stoch Death Cross!")
     
-    # 3. Trend Bearish
     if bearish_trend:
         exit_score += 1
         exit_reasons.append("Bearish Trend ⚠️")
     
-    # 4. RSI terlalu tinggi
     if rsi_val > 70:
         exit_score += 0.5
         exit_reasons.append(f"RSI overbought ({rsi_val:.1f})")
+    
+    # ========== TAMBAHKAN DETEKSI WHIPSAW ==========
+    whipsaw = detect_whipsaw(df, lookback=20, buffer_pct=0.5)
+    
+    # ========== MODIFIKASI SCORE BERDASARKAN WHIPSAW ==========
+    if whipsaw["is_whipsaw"]:
+        buy_score = max(0, buy_score - 3)
+        buy_reasons.append(f"⚠️ {whipsaw['status']}")
+        
+        if "FAKE_BREAKOUT_UP" in whipsaw["direction"]:
+            exit_score += 2
+            buy_reasons.append("🔴 Fake breakout up, bias bearish")
+        elif "FAKE_BREAKOUT_DOWN" in whipsaw["direction"]:
+            buy_score += 1
+            buy_reasons.append("🟢 Fake breakout down, bias bullish")
     
     # =========================================================
     # KEPUTUSAN AKHIR
@@ -817,7 +805,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     is_buy = False
     reasons = []
     
-    # BUY - Minimal score 6 untuk spot (lebih ketat)
     if buy_score >= 6:
         if buy_score >= 8 and stoch_golden_cross and macd_golden_cross and strong_bullish:
             signal_type = "⭐⭐⭐ STRONG BUY"
@@ -838,7 +825,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
             is_buy = True
             reasons = buy_reasons
     
-    # EXIT (jika sudah punya posisi)
     elif exit_score >= 4:
         if exit_score >= 6 and stoch_death_cross and macd_death_cross:
             signal_type = "🔴 STRONG EXIT"
@@ -851,7 +837,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
             action = "🔴 EXIT"
             reasons = exit_reasons
     
-    # HOLD
     else:
         if macd_val > signal_val and 20 <= stoch_k_val <= 80:
             signal_type = "🟡 HOLD"
@@ -872,6 +857,7 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         "is_buy": is_buy,
         "score": {"buy": buy_score, "exit": exit_score},
         "reasons": reasons,
+        "whipsaw": whipsaw,
         "macd": {
             "dif": macd_val,
             "dea": signal_val,
@@ -922,7 +908,8 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     buy_count = 0
     sell_count = 0
     hold_count = 0
-        # ========== TAMBAHKAN UNTUK WHIPSAW ==========
+    
+    # ========== TAMBAHKAN UNTUK WHIPSAW ==========
     whipsaw_scores = []
     whipsaw_status = []
     
@@ -935,14 +922,13 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
                 sell_count += 1
             else:
                 hold_count += 1
-
-                # Kumpulkan whipsaw dari setiap timeframe
+            
+            # Kumpulkan whipsaw dari setiap timeframe
             if "whipsaw" in res:
                 whipsaw_scores.append(res["whipsaw"]["score"])
                 whipsaw_status.append(res["whipsaw"]["status"])
-
-        # ========== WHIPSAW MULTI TIMEFRAME ==========
-    # Jika whipsaw terdeteksi di 2+ timeframe, tandai
+    
+    # ========== WHIPSAW MULTI TIMEFRAME ==========
     whipsaw_count = sum(1 for s in whipsaw_status if "WHIPSAW" in s or "FALSE" in s)
     whipsaw_avg_score = sum(whipsaw_scores) / len(whipsaw_scores) if whipsaw_scores else 0
     
@@ -971,20 +957,19 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     else:
         main_signal = "🟡 HOLD / WAIT"
         main_strength = 1
-
+    
     if combined["whipsaw_detected"]:
-    main_strength = max(1, main_strength - 1)
-    main_signal += " ⚠️ WHIPSAW"
+        main_strength = max(1, main_strength - 1)
+        main_signal += " ⚠️ WHIPSAW"
     
     combined["main_signal"] = main_signal
     combined["main_strength"] = main_strength
     combined["buy_count"] = buy_count
     combined["sell_count"] = sell_count
     combined["hold_count"] = hold_count
-    combined["total_score"] = 50 + (buy_count * 10)  # Tambahan untuk score
+    combined["total_score"] = 50 + (buy_count * 10)
     
     return combined
-
 # =========================================================
 # CREATE CHART
 # =========================================================
@@ -1249,11 +1234,18 @@ with tab1:
                         "Coin": symbol,
                         "Signal": result["main_signal"],
                         "Strength": "⭐" * result.get("main_strength", 1),
-                                            # ========== TAMBAHKAN WHIPSAW ==========
-                        "Whipsaw": result.get("whipsaw_status", "🟢 CLEAR"),
-                        "Whipsaw Score": f"{result.get('whipsaw_score', 0):.1f}",
-                        # =======================================
                     }
+                    # ========== TAMBAHKAN INI ==========
+                    # Deteksi whipsaw untuk coin ini
+                    df_15m = get_data_safe(symbol, "15m", min_candles=30)
+                    if df_15m is not None:
+                        ws = detect_whipsaw(df_15m)
+                        signal_data["Whipsaw"] = ws["status"]
+                        signal_data["Whipsaw Score"] = ws["score"]
+                    else:
+                        signal_data["Whipsaw"] = "❓ N/A"
+                        signal_data["Whipsaw Score"] = 0
+                    # ==================================
                     
                     for tf in ["15m", "1h", "4h"]:
                         if tf in result["timeframes"]:
@@ -1432,18 +1424,26 @@ with tab2:
                     if result["reasons"]:
                         for reason in result["reasons"]:
                             st.write(f"• {reason}")
+                    
+                    # ========== WHIPSAW DETECTION ==========
+                    ws = detect_whipsaw(df)
+                    st.write(f"**Whipsaw Status:** {ws['status']}")
+                    st.write(f"**Whipsaw Score:** {ws['score']}/10")
+                    if ws["reasons"]:
+                        st.write("**Whipsaw Reasons:**")
+                        for reason in ws["reasons"]:
+                            st.write(f"  • {reason}")
+                    st.write(f"**Range:** ${ws['range_low']:.4f} - ${ws['range_high']:.4f}")
+                    st.write(f"**ADX:** {ws['adx']:.1f} | **Volume Ratio:** {ws['vol_ratio']:.2f}x")
+                    # =========================================
+                
+ 
                     st.write(f"**Trend:** {'🟢 Strong Bullish (EMA100+)' if result['strong_bullish'] else '🟢 Bullish' if result['bullish_trend'] else '🔴 Bearish' if result['bearish_trend'] else '🟡 Sideways'}")
                     st.write(f"**EMA20:** {result['ema20']:.4f}")
                     st.write(f"**EMA50:** {result['ema50']:.4f}")
                     st.write(f"**EMA100:** {result['ema100']:.4f}")
                     st.write(f"**Buy Score:** {result['score']['buy']:.1f} | **Exit Score:** {result['score']['exit']:.1f}")
-                    if "whipsaw" in result:
-                    ws = result["whipsaw"]
-                    st.write(f"**Whipsaw Status:** {ws['status']}")
-                    st.write(f"**Whipsaw Score:** {ws['score']}/10")
-                    if ws["reasons"]:
-                        for reason in ws["reasons"]:
-                            st.write(f"  • {reason}")
+        
                     st.write(f"**Range:** ${ws['range_low']:.4f} - ${ws['range_high']:.4f}")
                     st.write(f"**ADX:** {ws['adx']:.1f} | **Volume Ratio:** {ws['vol_ratio']:.2f}x")
                     fig = create_chart(df, chart_coin, chart_tf)
@@ -1724,10 +1724,10 @@ with tab5:
     col3.metric("Losses", stats.get("losses", 0))
     col4.metric("Win Rate", f"{stats.get('win_rate', 0):.1f}%")
     
+    # ========== WHIPSAW STATISTICS ==========
     st.divider()
-    st.subheader("📈 SPOT Trading Rules Summary")
-
-        # Ambil data history dan hitung whipsaw
+    st.subheader("📊 Whipsaw Statistics")
+    
     history = get_signal_history(limit=200)
     if history:
         whipsaw_count = len([h for h in history if "WHIPSAW" in h.get("signal", "")])
@@ -1738,6 +1738,10 @@ with tab5:
         col1.metric("Total Signals", total_signals)
         col2.metric("Whipsaw Signals", whipsaw_count)
         col3.metric("Whipsaw Rate", f"{whipsaw_percent:.1f}%")
+    # =========================================
+    
+    st.divider()
+    st.subheader("📈 SPOT Trading Rules Summary")
     rules = {
         "BUY ⭐⭐⭐⭐⭐": "MACD histogram > 0, DIF > DEA, Stoch RSI 10-30, Golden Cross, EMA100+",
         "BUY ⭐⭐⭐⭐": "MACD DIF > DEA, Stoch 20-40 & mengarah naik, bullish trend",
@@ -1747,14 +1751,3 @@ with tab5:
     }
     for rule, desc in rules.items():
         st.write(f"**{rule}:** {desc}")
-
-# =========================================================
-# FOOTER
-# =========================================================
-st.divider()
-st.caption(f"""
-🔄 Data dari Yahoo Finance | Timeframe: 15M, 1H, 4H  
-📊 Indikator: MACD + Stochastic RSI + EMA20 + EMA50 + EMA100 + Volume  
-💾 Database: Supabase PostgreSQL  
-📌 Mode: SPOT (BUY & EXIT Only)
-""") 
