@@ -125,6 +125,9 @@ def get_supabase() -> Client:
 # =========================================================
 # DETEKSI WHIPSAW (False Breakout)
 # =========================================================
+# =========================================================
+# DETEKSI WHIPSAW (False Breakout)
+# =========================================================
 def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
     """
     Deteksi whipsaw: breakout palsu yang berbalik arah.
@@ -133,7 +136,7 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
     - Volume tidak mendukung breakout
     """
     if df is None or len(df) < lookback + 5:
-        return {"is_whipsaw": False, "score": 0, "direction": "NONE", "reasons": []}
+        return {"is_whipsaw": False, "score": 0, "direction": "NONE", "reasons": [], "status": "🟢 NO WHIPSAW", "range_high": 0, "range_low": 0, "range_width": 0, "adx": 0, "vol_ratio": 0}
     
     # Ambil data terakhir
     high = df["High"]
@@ -157,15 +160,23 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
     vol_current = df["Volume"].iloc[-1]
     vol_ratio = vol_current / vol_ma if vol_ma > 0 else 1
     
-    # Bollinger Band
-    upper, middle, lower = BollingerBands(df, window=20, std=2)
-    bb_upper = upper.iloc[-1] if not pd.isna(upper.iloc[-1]) else recent_high * 1.05
-    bb_lower = lower.iloc[-1] if not pd.isna(lower.iloc[-1]) else recent_low * 0.95
-    bb_middle = middle.iloc[-1] if not pd.isna(middle.iloc[-1]) else range_mid
+    # Bollinger Band - PERBAIKAN DI SINI
+    try:
+        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        bb_middle = bb.bollinger_mavg().iloc[-1]
+        bb_lower = bb.bollinger_lband().iloc[-1]
+    except:
+        bb_upper = recent_high * 1.05
+        bb_middle = range_mid
+        bb_lower = recent_low * 0.95
     
-    # ADX
-    adx = ADX(df, 14)
-    adx_now = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0
+    # ADX - PERBAIKAN DI SINI
+    try:
+        adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"], window=14)
+        adx_now = adx.adx().iloc[-1] if not pd.isna(adx.adx().iloc[-1]) else 0
+    except:
+        adx_now = 0
     
     # =========================================================
     # DETEKSI BREAKOUT PALSU (WHIPSAW)
@@ -176,15 +187,12 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
     is_whipsaw = False
     
     # === 1. FALSE BREAKOUT ATAS ===
-    # Harga menembus resistance/BB atas, tapi kembali
     if high_last > recent_high * 1.005 or high_last > bb_upper:
-        # Cek apakah close kembali ke bawah resistance
         if current_close < recent_high * 0.995:
             score += 3
             reasons.append("Fake breakout atas (kembali ke range)")
             direction = "FAKE_BREAKOUT_UP"
             
-            # Cek volume (breakout harus tinggi, tapi tidak sustain)
             if vol_ratio < 1.2:
                 score += 2
                 reasons.append("Volume rendah, breakout tidak valid")
@@ -192,13 +200,11 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
                 score += 1
                 reasons.append("ADX rendah, tidak ada tren kuat")
             
-            # Cek jika candle panjang naik lalu ditutup bearish
             if prev_close > current_close and high_last - low_last > range_width * 0.5:
                 score += 2
                 reasons.append("Candle panjang naik lalu ditutup turun")
     
     # === 2. FALSE BREAKOUT BAWAH ===
-    # Harga menembus support/BB bawah, tapi kembali
     if low_last < recent_low * 0.995 or low_last < bb_lower:
         if current_close > recent_low * 1.005:
             score += 3
@@ -217,29 +223,29 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
                 reasons.append("Candle panjang turun lalu ditutup naik")
     
     # === 3. SIDEWAYS + WHIPSAW ===
-    # Jika harga masih dalam range tapi sering naik-turun
-    if recent_high - recent_low < range_mid * 0.05:  # Range sempit
-        if abs(current_close - prev_close) / prev_close > 0.01:  # Pergerakan >1%
+    if recent_high - recent_low < range_mid * 0.05:
+        if abs(current_close - prev_close) / prev_close > 0.01:
             score += 1
             reasons.append("Range sempit tapi volatilitas tinggi (whipsaw)")
     
     # === 4. CLOSE DI TENGAH RANGE ===
-    # Jika close dekat dengan middle range setelah breakout
     if abs(current_close - range_mid) / range_mid < 0.01:
         if score >= 3:
             score += 1
             reasons.append("Close di tengah range, konfirmasi whipsaw")
     
     # === 5. MACD DIVERGENCE ===
-    macd_line, signal_line, histogram = MACD(df)
-    if len(macd_line) > 10:
-        macd_hist_prev = histogram.iloc[-2] if len(histogram) > 1 else 0
-        macd_hist_now = histogram.iloc[-1]
-        
-        # Histogram menurun setelah breakout
-        if macd_hist_now < macd_hist_prev and score >= 3:
-            score += 1
-            reasons.append("MACD histogram menurun (momentum hilang)")
+    try:
+        macd_line, signal_line, histogram = MACD(df)
+        if len(macd_line) > 10:
+            macd_hist_prev = histogram.iloc[-2] if len(histogram) > 1 else 0
+            macd_hist_now = histogram.iloc[-1]
+            
+            if macd_hist_now < macd_hist_prev and score >= 3:
+                score += 1
+                reasons.append("MACD histogram menurun (momentum hilang)")
+    except:
+        pass
     
     # =========================================================
     # KEPUTUSAN
@@ -264,13 +270,12 @@ def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
         "status": status,
         "direction": direction,
         "reasons": reasons,
-        "range_high": recent_high,
-        "range_low": recent_low,
-        "range_width": range_width,
-        "adx": adx_now,
-        "vol_ratio": vol_ratio
+        "range_high": float(recent_high),
+        "range_low": float(recent_low),
+        "range_width": float(range_width),
+        "adx": float(adx_now),
+        "vol_ratio": float(vol_ratio)
     }
-
 
 # =========================================================
 # DATABASE FUNCTIONS
