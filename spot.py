@@ -21,7 +21,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="🤖 Crypto Bot PRO - SPOT (MACD + Stoch RSI)",
+    page_title="spot",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -1126,7 +1126,7 @@ if not st.session_state.positions:
 # =========================================================
 # MAIN TITLE
 # =========================================================
-st.title("🤖 Crypto Bot PRO - SPOT Trading")
+st.title("🤖")
 st.caption("Multi Timeframe: 15M | 1H | 4H | MACD + Stochastic RSI + EMA100 | BUY & EXIT Only")
 
 # =========================================================
