@@ -121,6 +121,156 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 # =========================================================
+# DETEKSI WHIPSAW (False Breakout)
+# =========================================================
+def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
+    """
+    Deteksi whipsaw: breakout palsu yang berbalik arah.
+    - Harga menembus resistance/support
+    - Tapi tidak bertahan (close kembali ke range)
+    - Volume tidak mendukung breakout
+    """
+    if df is None or len(df) < lookback + 5:
+        return {"is_whipsaw": False, "score": 0, "direction": "NONE", "reasons": []}
+    
+    # Ambil data terakhir
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    
+    # Support & Resistance dari range
+    recent_high = high.tail(lookback).max()
+    recent_low = low.tail(lookback).min()
+    range_mid = (recent_high + recent_low) / 2
+    range_width = (recent_high - recent_low) / range_mid if range_mid != 0 else 0
+    
+    # Harga saat ini dan sebelumnya
+    current_close = close.iloc[-1]
+    prev_close = close.iloc[-2] if len(close) > 1 else current_close
+    high_last = high.iloc[-1]
+    low_last = low.iloc[-1]
+    
+    # Volume
+    vol_ma = df["Volume"].rolling(10).mean().iloc[-1]
+    vol_current = df["Volume"].iloc[-1]
+    vol_ratio = vol_current / vol_ma if vol_ma > 0 else 1
+    
+    # Bollinger Band
+    upper, middle, lower = BollingerBands(df, window=20, std=2)
+    bb_upper = upper.iloc[-1] if not pd.isna(upper.iloc[-1]) else recent_high * 1.05
+    bb_lower = lower.iloc[-1] if not pd.isna(lower.iloc[-1]) else recent_low * 0.95
+    bb_middle = middle.iloc[-1] if not pd.isna(middle.iloc[-1]) else range_mid
+    
+    # ADX
+    adx = ADX(df, 14)
+    adx_now = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0
+    
+    # =========================================================
+    # DETEKSI BREAKOUT PALSU (WHIPSAW)
+    # =========================================================
+    score = 0
+    reasons = []
+    direction = "NONE"
+    is_whipsaw = False
+    
+    # === 1. FALSE BREAKOUT ATAS ===
+    # Harga menembus resistance/BB atas, tapi kembali
+    if high_last > recent_high * 1.005 or high_last > bb_upper:
+        # Cek apakah close kembali ke bawah resistance
+        if current_close < recent_high * 0.995:
+            score += 3
+            reasons.append("Fake breakout atas (kembali ke range)")
+            direction = "FAKE_BREAKOUT_UP"
+            
+            # Cek volume (breakout harus tinggi, tapi tidak sustain)
+            if vol_ratio < 1.2:
+                score += 2
+                reasons.append("Volume rendah, breakout tidak valid")
+            if adx_now < 25:
+                score += 1
+                reasons.append("ADX rendah, tidak ada tren kuat")
+            
+            # Cek jika candle panjang naik lalu ditutup bearish
+            if prev_close > current_close and high_last - low_last > range_width * 0.5:
+                score += 2
+                reasons.append("Candle panjang naik lalu ditutup turun")
+    
+    # === 2. FALSE BREAKOUT BAWAH ===
+    # Harga menembus support/BB bawah, tapi kembali
+    if low_last < recent_low * 0.995 or low_last < bb_lower:
+        if current_close > recent_low * 1.005:
+            score += 3
+            reasons.append("Fake breakout bawah (kembali ke range)")
+            direction = "FAKE_BREAKOUT_DOWN"
+            
+            if vol_ratio < 1.2:
+                score += 2
+                reasons.append("Volume rendah, breakout tidak valid")
+            if adx_now < 25:
+                score += 1
+                reasons.append("ADX rendah, tidak ada tren kuat")
+            
+            if prev_close < current_close and high_last - low_last > range_width * 0.5:
+                score += 2
+                reasons.append("Candle panjang turun lalu ditutup naik")
+    
+    # === 3. SIDEWAYS + WHIPSAW ===
+    # Jika harga masih dalam range tapi sering naik-turun
+    if recent_high - recent_low < range_mid * 0.05:  # Range sempit
+        if abs(current_close - prev_close) / prev_close > 0.01:  # Pergerakan >1%
+            score += 1
+            reasons.append("Range sempit tapi volatilitas tinggi (whipsaw)")
+    
+    # === 4. CLOSE DI TENGAH RANGE ===
+    # Jika close dekat dengan middle range setelah breakout
+    if abs(current_close - range_mid) / range_mid < 0.01:
+        if score >= 3:
+            score += 1
+            reasons.append("Close di tengah range, konfirmasi whipsaw")
+    
+    # === 5. MACD DIVERGENCE ===
+    macd_line, signal_line, histogram = MACD(df)
+    if len(macd_line) > 10:
+        macd_hist_prev = histogram.iloc[-2] if len(histogram) > 1 else 0
+        macd_hist_now = histogram.iloc[-1]
+        
+        # Histogram menurun setelah breakout
+        if macd_hist_now < macd_hist_prev and score >= 3:
+            score += 1
+            reasons.append("MACD histogram menurun (momentum hilang)")
+    
+    # =========================================================
+    # KEPUTUSAN
+    # =========================================================
+    if score >= 5:
+        is_whipsaw = True
+        if "FAKE_BREAKOUT_UP" in direction:
+            status = "🔴 FALSE BREAKOUT UP (Sell Signal)"
+        elif "FAKE_BREAKOUT_DOWN" in direction:
+            status = "🔴 FALSE BREAKOUT DOWN (Buy Signal)"
+        else:
+            status = "🟡 WHIPSAW DETECTED"
+    elif score >= 3:
+        is_whipsaw = True
+        status = "🟡 POTENTIAL WHIPSAW"
+    else:
+        status = "🟢 NO WHIPSAW"
+    
+    return {
+        "is_whipsaw": is_whipsaw,
+        "score": score,
+        "status": status,
+        "direction": direction,
+        "reasons": reasons,
+        "range_high": recent_high,
+        "range_low": recent_low,
+        "range_width": range_width,
+        "adx": adx_now,
+        "vol_ratio": vol_ratio
+    }
+
+
+# =========================================================
 # DATABASE FUNCTIONS
 # =========================================================
 def get_watchlist():
@@ -496,6 +646,26 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     """Versi SPOT - hanya BUY dan EXIT (tanpa SELL)"""
     if df is None or len(df) < 30:
         return None
+
+        # ========== TAMBAHKAN DETEKSI WHIPSAW ==========
+    whipsaw = detect_whipsaw(df, lookback=20, buffer_pct=0.5)
+    
+    # ========== MODIFIKASI KEPUTUSAN ==========
+    # Jika whipsaw terdeteksi, jangan entry
+    if whipsaw["is_whipsaw"]:
+        buy_score = max(0, buy_score - 3)  # Kurangi buy score
+        exit_score = max(0, exit_score - 1)
+        reasons.append(f"⚠️ {whipsaw['status']}")
+        
+        # Jika false breakout, arah sebaliknya
+        if "FAKE_BREAKOUT_UP" in whipsaw["direction"]:
+            # False breakout up = harga akan turun
+            sell_score += 2
+            reasons.append("🔴 Fake breakout up, bias bearish")
+        elif "FAKE_BREAKOUT_DOWN" in whipsaw["direction"]:
+            # False breakout down = harga akan naik
+            buy_score += 1
+            reasons.append("🟢 Fake breakout down, bias bullish")
     
     macd_line, signal_line, histogram = MACD(df)
     stoch_k, stoch_d, rsi = StochasticRSI(df)
@@ -752,6 +922,9 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     buy_count = 0
     sell_count = 0
     hold_count = 0
+        # ========== TAMBAHKAN UNTUK WHIPSAW ==========
+    whipsaw_scores = []
+    whipsaw_status = []
     
     for tf in ["4h", "1h", "15m"]:
         if tf in results:
@@ -762,6 +935,20 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
                 sell_count += 1
             else:
                 hold_count += 1
+
+                # Kumpulkan whipsaw dari setiap timeframe
+            if "whipsaw" in res:
+                whipsaw_scores.append(res["whipsaw"]["score"])
+                whipsaw_status.append(res["whipsaw"]["status"])
+
+        # ========== WHIPSAW MULTI TIMEFRAME ==========
+    # Jika whipsaw terdeteksi di 2+ timeframe, tandai
+    whipsaw_count = sum(1 for s in whipsaw_status if "WHIPSAW" in s or "FALSE" in s)
+    whipsaw_avg_score = sum(whipsaw_scores) / len(whipsaw_scores) if whipsaw_scores else 0
+    
+    combined["whipsaw_detected"] = whipsaw_count >= 2
+    combined["whipsaw_score"] = whipsaw_avg_score
+    combined["whipsaw_status"] = "🔴 WHIPSAW" if whipsaw_count >= 2 else "🟢 CLEAR"
     
     main_signal = "⏳ WAIT"
     main_strength = 0
@@ -784,6 +971,10 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     else:
         main_signal = "🟡 HOLD / WAIT"
         main_strength = 1
+
+    if combined["whipsaw_detected"]:
+    main_strength = max(1, main_strength - 1)
+    main_signal += " ⚠️ WHIPSAW"
     
     combined["main_signal"] = main_signal
     combined["main_strength"] = main_strength
@@ -1058,6 +1249,10 @@ with tab1:
                         "Coin": symbol,
                         "Signal": result["main_signal"],
                         "Strength": "⭐" * result.get("main_strength", 1),
+                                            # ========== TAMBAHKAN WHIPSAW ==========
+                        "Whipsaw": result.get("whipsaw_status", "🟢 CLEAR"),
+                        "Whipsaw Score": f"{result.get('whipsaw_score', 0):.1f}",
+                        # =======================================
                     }
                     
                     for tf in ["15m", "1h", "4h"]:
@@ -1242,12 +1437,20 @@ with tab2:
                     st.write(f"**EMA50:** {result['ema50']:.4f}")
                     st.write(f"**EMA100:** {result['ema100']:.4f}")
                     st.write(f"**Buy Score:** {result['score']['buy']:.1f} | **Exit Score:** {result['score']['exit']:.1f}")
-                
-                fig = create_chart(df, chart_coin, chart_tf)
-                if fig:
-                    st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
+                    if "whipsaw" in result:
+                    ws = result["whipsaw"]
+                    st.write(f"**Whipsaw Status:** {ws['status']}")
+                    st.write(f"**Whipsaw Score:** {ws['score']}/10")
+                    if ws["reasons"]:
+                        for reason in ws["reasons"]:
+                            st.write(f"  • {reason}")
+                    st.write(f"**Range:** ${ws['range_low']:.4f} - ${ws['range_high']:.4f}")
+                    st.write(f"**ADX:** {ws['adx']:.1f} | **Volume Ratio:** {ws['vol_ratio']:.2f}x")
+                    fig = create_chart(df, chart_coin, chart_tf)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
 # ==================== TAB 3: POSITIONS ====================
 # ==================== TAB 3: POSITIONS ====================
@@ -1257,6 +1460,13 @@ with tab3:
     # ========== CEK APAKAH PERLU UPDATE ==========
     now = datetime.now()
     time_since_refresh = (now - st.session_state.get("last_refresh", now)).seconds
+    show_whipsaw = st.checkbox("⚠️ Show whipsaw positions", value=False)
+    
+    if not show_whipsaw:
+        # Filter posisi yang tidak whipsaw
+        # (Ini hanya contoh, sesuaikan dengan logika Anda)
+        pass
+    # =============================================
     
     # Hanya update jika sudah lewat 30 detik atau positions kosong
     if time_since_refresh > 30 or not st.session_state.positions:
@@ -1516,6 +1726,18 @@ with tab5:
     
     st.divider()
     st.subheader("📈 SPOT Trading Rules Summary")
+
+        # Ambil data history dan hitung whipsaw
+    history = get_signal_history(limit=200)
+    if history:
+        whipsaw_count = len([h for h in history if "WHIPSAW" in h.get("signal", "")])
+        total_signals = len(history)
+        whipsaw_percent = (whipsaw_count / total_signals * 100) if total_signals > 0 else 0
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Signals", total_signals)
+        col2.metric("Whipsaw Signals", whipsaw_count)
+        col3.metric("Whipsaw Rate", f"{whipsaw_percent:.1f}%")
     rules = {
         "BUY ⭐⭐⭐⭐⭐": "MACD histogram > 0, DIF > DEA, Stoch RSI 10-30, Golden Cross, EMA100+",
         "BUY ⭐⭐⭐⭐": "MACD DIF > DEA, Stoch 20-40 & mengarah naik, bullish trend",
