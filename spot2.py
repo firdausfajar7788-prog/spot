@@ -10,7 +10,6 @@ import os
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 from supabase import create_client, Client
- 
 from ta.volatility import AverageTrueRange, BollingerBands
 from ta.trend import ADXIndicator
 
@@ -21,7 +20,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIG
 # =========================================================
 st.set_page_config(
-    page_title="spot",
+    page_title="🤖 Crypto Bot PRO - Bottom Momentum Scanner",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -38,6 +37,10 @@ st.markdown("""
         border-radius: 16px;
         padding: 16px;
         box-shadow: 0 4px 20px rgba(0,255,255,0.05);
+    }
+    [data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 30px rgba(0,255,255,0.1);
     }
     .signal-buy {
         background: linear-gradient(135deg, rgba(0,255,136,0.15), rgba(0,255,136,0.05));
@@ -66,14 +69,25 @@ st.markdown("""
         font-weight: 600;
         font-size: 18px;
     }
-    .signal-take-profit {
-        background: linear-gradient(135deg, rgba(0,150,255,0.15), rgba(0,150,255,0.05));
-        border: 1px solid #0096ff;
+    .bottom-strong {
+        background: linear-gradient(135deg, rgba(0,255,136,0.25), rgba(0,255,136,0.05));
+        border: 2px solid #00ff88;
         border-radius: 12px;
         padding: 12px 20px;
-        color: #0096ff;
-        font-weight: 600;
+        color: #00ff88;
+        font-weight: 700;
         font-size: 18px;
+        text-align: center;
+    }
+    .bottom-momentum {
+        background: linear-gradient(135deg, rgba(255,170,0,0.2), rgba(255,170,0,0.05));
+        border: 1px solid #ffaa00;
+        border-radius: 12px;
+        padding: 12px 20px;
+        color: #ffaa00;
+        font-weight: 700;
+        font-size: 16px;
+        text-align: center;
     }
     .pending-signal {
         background: linear-gradient(135deg, rgba(255,170,0,0.15), rgba(255,170,0,0.05));
@@ -123,503 +137,6 @@ def get_supabase() -> Client:
     return create_client(url, key)
 
 # =========================================================
-# DETEKSI WHIPSAW (False Breakout)
-# =========================================================
-# =========================================================
-# DETEKSI WHIPSAW (False Breakout)
-# =========================================================
-def detect_whipsaw(df, lookback=20, buffer_pct=0.5):
-    """
-    Deteksi whipsaw: breakout palsu yang berbalik arah.
-    - Harga menembus resistance/support
-    - Tapi tidak bertahan (close kembali ke range)
-    - Volume tidak mendukung breakout
-    """
-    if df is None or len(df) < lookback + 5:
-        return {"is_whipsaw": False, "score": 0, "direction": "NONE", "reasons": [], "status": "🟢 NO WHIPSAW", "range_high": 0, "range_low": 0, "range_width": 0, "adx": 0, "vol_ratio": 0}
-    
-    # Ambil data terakhir
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-    
-    # Support & Resistance dari range
-    recent_high = high.tail(lookback).max()
-    recent_low = low.tail(lookback).min()
-    range_mid = (recent_high + recent_low) / 2
-    range_width = (recent_high - recent_low) / range_mid if range_mid != 0 else 0
-    
-    # Harga saat ini dan sebelumnya
-    current_close = close.iloc[-1]
-    prev_close = close.iloc[-2] if len(close) > 1 else current_close
-    high_last = high.iloc[-1]
-    low_last = low.iloc[-1]
-    
-    # Volume
-    vol_ma = df["Volume"].rolling(10).mean().iloc[-1]
-    vol_current = df["Volume"].iloc[-1]
-    vol_ratio = vol_current / vol_ma if vol_ma > 0 else 1
-    
-    # Bollinger Band - PERBAIKAN DI SINI
-    try:
-        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
-        bb_upper = bb.bollinger_hband().iloc[-1]
-        bb_middle = bb.bollinger_mavg().iloc[-1]
-        bb_lower = bb.bollinger_lband().iloc[-1]
-    except:
-        bb_upper = recent_high * 1.05
-        bb_middle = range_mid
-        bb_lower = recent_low * 0.95
-    
-    # ADX - PERBAIKAN DI SINI
-    try:
-        adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"], window=14)
-        adx_now = adx.adx().iloc[-1] if not pd.isna(adx.adx().iloc[-1]) else 0
-    except:
-        adx_now = 0
-    
-    # =========================================================
-    # DETEKSI BREAKOUT PALSU (WHIPSAW)
-    # =========================================================
-    score = 0
-    reasons = []
-    direction = "NONE"
-    is_whipsaw = False
-    
-    # === 1. FALSE BREAKOUT ATAS ===
-    if high_last > recent_high * 1.005 or high_last > bb_upper:
-        if current_close < recent_high * 0.995:
-            score += 3
-            reasons.append("Fake breakout atas (kembali ke range)")
-            direction = "FAKE_BREAKOUT_UP"
-            
-            if vol_ratio < 1.2:
-                score += 2
-                reasons.append("Volume rendah, breakout tidak valid")
-            if adx_now < 25:
-                score += 1
-                reasons.append("ADX rendah, tidak ada tren kuat")
-            
-            if prev_close > current_close and high_last - low_last > range_width * 0.5:
-                score += 2
-                reasons.append("Candle panjang naik lalu ditutup turun")
-    
-    # === 2. FALSE BREAKOUT BAWAH ===
-    if low_last < recent_low * 0.995 or low_last < bb_lower:
-        if current_close > recent_low * 1.005:
-            score += 3
-            reasons.append("Fake breakout bawah (kembali ke range)")
-            direction = "FAKE_BREAKOUT_DOWN"
-            
-            if vol_ratio < 1.2:
-                score += 2
-                reasons.append("Volume rendah, breakout tidak valid")
-            if adx_now < 25:
-                score += 1
-                reasons.append("ADX rendah, tidak ada tren kuat")
-            
-            if prev_close < current_close and high_last - low_last > range_width * 0.5:
-                score += 2
-                reasons.append("Candle panjang turun lalu ditutup naik")
-    
-    # === 3. SIDEWAYS + WHIPSAW ===
-    if recent_high - recent_low < range_mid * 0.05:
-        if abs(current_close - prev_close) / prev_close > 0.01:
-            score += 1
-            reasons.append("Range sempit tapi volatilitas tinggi (whipsaw)")
-    
-    # === 4. CLOSE DI TENGAH RANGE ===
-    if abs(current_close - range_mid) / range_mid < 0.01:
-        if score >= 3:
-            score += 1
-            reasons.append("Close di tengah range, konfirmasi whipsaw")
-    
-    # === 5. MACD DIVERGENCE ===
-    try:
-        macd_line, signal_line, histogram = MACD(df)
-        if len(macd_line) > 10:
-            macd_hist_prev = histogram.iloc[-2] if len(histogram) > 1 else 0
-            macd_hist_now = histogram.iloc[-1]
-            
-            if macd_hist_now < macd_hist_prev and score >= 3:
-                score += 1
-                reasons.append("MACD histogram menurun (momentum hilang)")
-    except:
-        pass
-    
-    # =========================================================
-    # KEPUTUSAN
-    # =========================================================
-    if score >= 5:
-        is_whipsaw = True
-        if "FAKE_BREAKOUT_UP" in direction:
-            status = "🔴 FALSE BREAKOUT UP (Sell Signal)"
-        elif "FAKE_BREAKOUT_DOWN" in direction:
-            status = "🔴 FALSE BREAKOUT DOWN (Buy Signal)"
-        else:
-            status = "🟡 WHIPSAW DETECTED"
-    elif score >= 3:
-        is_whipsaw = True
-        status = "🟡 POTENTIAL WHIPSAW"
-    else:
-        status = "🟢 NO WHIPSAW"
-    
-    return {
-        "is_whipsaw": is_whipsaw,
-        "score": score,
-        "status": status,
-        "direction": direction,
-        "reasons": reasons,
-        "range_high": float(recent_high),
-        "range_low": float(recent_low),
-        "range_width": float(range_width),
-        "adx": float(adx_now),
-        "vol_ratio": float(vol_ratio)
-    }
-
-# =========================================================
-# DATABASE FUNCTIONS
-# =========================================================
-def get_watchlist():
-    supabase = get_supabase()
-    try:
-        res = supabase.table("watchlist").select("symbol").order("added_at").execute()
-        return [row["symbol"] for row in res.data] if res.data else ["BTC"]
-    except:
-        return ["BTC"]
-
-def add_coin(symbol):
-    supabase = get_supabase()
-    try:
-        supabase.table("watchlist").insert({"symbol": symbol.upper()}).execute()
-        return True
-    except:
-        return False
-
-def remove_coin(symbol):
-    supabase = get_supabase()
-    try:
-        res = supabase.table("watchlist").delete().eq("symbol", symbol.upper()).execute()
-        return len(res.data) > 0
-    except:
-        return False
-
-def save_signal(data):
-    """Simpan sinyal dengan cegah duplikat"""
-    supabase = get_supabase()
-    try:
-        # Cek duplikat dalam 5 menit terakhir
-        symbol = data.get("symbol")
-        signal = data.get("signal")
-        
-        five_min_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
-        res = supabase.table("signal_history")\
-            .select("id")\
-            .eq("symbol", symbol)\
-            .eq("signal", signal)\
-            .gte("timestamp", five_min_ago)\
-            .execute()
-        
-        if res.data and len(res.data) > 0:
-            return False  # Duplikat, skip save
-        
-        data["timestamp"] = datetime.now().isoformat()
-        supabase.table("signal_history").insert(data).execute()
-        return True
-    except:
-        return False
-
-def get_signal_history(limit=100):
-    supabase = get_supabase()
-    try:
-        res = supabase.table("signal_history").select("*").order("timestamp", desc=True).limit(limit).execute()
-        return res.data
-    except:
-        return []
-
-def update_performance(stats):
-    supabase = get_supabase()
-    try:
-        supabase.table("performance").upsert(
-            {"key": "performance_stats", "value": stats, "updated_at": datetime.now().isoformat()},
-            on_conflict="key"
-        ).execute()
-        return True
-    except:
-        return False
-
-def get_performance():
-    supabase = get_supabase()
-    default = {"total_signals": 0, "wins": 0, "losses": 0, "total_profit": 0, "win_rate": 0}
-    try:
-        res = supabase.table("performance").select("value").eq("key", "performance_stats").execute()
-        if res.data and len(res.data) > 0:
-            return res.data[0]["value"]
-        return default
-    except:
-        return default
-
-# =========================================================
-# POSITIONS DATABASE FUNCTIONS
-# =========================================================
-
-def save_position_to_db(symbol, entry, sl, tp, position_size=1):
-    """Simpan posisi baru ke database"""
-    supabase = get_supabase()
-    try:
-        data = {
-            "symbol": symbol,
-            "entry_price": float(entry),
-            "current_price": float(entry),
-            "stop_loss": float(sl),
-            "take_profit": float(tp),
-            "highest_price": float(entry),
-            "position_size": float(position_size),
-            "entry_time": datetime.now().isoformat(),
-            "status": "OPEN",
-            "pnl": 0,
-            "pnl_percent": 0
-        }
-        result = supabase.table("positions").insert(data).execute()
-        if result.data and len(result.data) > 0:
-            return result.data[0]
-        return None
-    except Exception as e:
-        st.error(f"❌ Database error: {e}")
-        return None
-
-def get_open_positions_from_db():
-    """Ambil semua posisi OPEN dari database"""
-    supabase = get_supabase()
-    try:
-        res = supabase.table("positions").select("*").eq("status", "OPEN").order("entry_time", desc=True).execute()
-        return res.data if res.data else []
-    except:
-        return []
-
-def get_closed_positions_from_db(limit=100):
-    """Ambil posisi CLOSED dari database"""
-    supabase = get_supabase()
-    try:
-        res = supabase.table("positions").select("*").eq("status", "CLOSED").order("exit_time", desc=True).limit(limit).execute()
-        return res.data if res.data else []
-    except:
-        return []
-
-def update_position_in_db(position_id, updates):
-    """Update posisi di database"""
-    supabase = get_supabase()
-    try:
-        updates["updated_at"] = datetime.now().isoformat()
-        supabase.table("positions").update(updates).eq("id", position_id).execute()
-        return True
-    except:
-        return False
-
-def close_position_in_db(position_id, exit_price, exit_reason, pnl, pnl_percent):
-    """Close posisi di database"""
-    supabase = get_supabase()
-    try:
-        updates = {
-            "status": "CLOSED",
-            "current_price": float(exit_price),
-            "exit_price": float(exit_price),
-            "exit_reason": exit_reason,
-            "pnl": float(pnl),
-            "pnl_percent": float(pnl_percent),
-            "exit_time": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-        supabase.table("positions").update(updates).eq("id", position_id).execute()
-        return True
-    except:
-        return False
-
-def get_portfolio_summary():
-    """Dapatkan summary portofolio dari database"""
-    supabase = get_supabase()
-    try:
-        open_positions = get_open_positions_from_db()
-        closed_positions = get_closed_positions_from_db(limit=100)
-        
-        # Total equity
-        total_equity = sum([p.get("current_price", 0) * p.get("position_size", 1) for p in open_positions])
-        
-        # Unrealized PNL (dari open positions)
-        unrealized_pnl = sum([p.get("pnl", 0) for p in open_positions])
-        unrealized_pnl_percent = sum([p.get("pnl_percent", 0) for p in open_positions])
-        
-        # Realized PNL (dari closed positions)
-        realized_pnl = sum([p.get("pnl", 0) for p in closed_positions])
-        
-        # Total PNL
-        total_pnl = unrealized_pnl + realized_pnl
-        
-        # Win rate
-        total_closed = len(closed_positions)
-        wins = len([p for p in closed_positions if p.get("pnl", 0) > 0])
-        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        
-        return {
-            "open_positions": open_positions,
-            "closed_positions": closed_positions,
-            "total_open": len(open_positions),
-            "total_closed": total_closed,
-            "total_equity": total_equity,
-            "wins": wins,
-            "losses": total_closed - wins,
-            "win_rate": win_rate,
-            "unrealized_pnl": unrealized_pnl,
-            "unrealized_pnl_percent": unrealized_pnl_percent,
-            "realized_pnl": realized_pnl,
-            "total_pnl": total_pnl
-        }
-    except Exception as e:
-        print(f"Error get portfolio summary: {e}")
-        return {
-            "open_positions": [],
-            "closed_positions": [],
-            "total_open": 0,
-            "total_closed": 0,
-            "total_equity": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "unrealized_pnl": 0,
-            "unrealized_pnl_percent": 0,
-            "realized_pnl": 0,
-            "total_pnl": 0
-        }
-
-# =========================================================
-# TELEGRAM FUNCTIONS - ANTI DUPLICATE
-# =========================================================
-if "sent_signals" not in st.session_state:
-    st.session_state.sent_signals = {}
-if "last_telegram_time" not in st.session_state:
-    st.session_state.last_telegram_time = {}
-
-def send_telegram_once(symbol, signal, result):
-    now = datetime.now()
-    last_time = st.session_state.last_telegram_time.get(symbol)
-    if last_time is not None:
-        diff = (now - last_time).seconds / 60
-        if diff < 10:
-            return False
-
-    signal_key = f"{symbol}_{signal}_{now.strftime('%Y%m%d_%H%M')}"
-    if signal_key in st.session_state.sent_signals:
-        return False
-
-    try:
-        bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
-        if bot_token and chat_id:
-            msg = f"⚡ SPOT SIGNAL!\n\nCoin: {symbol}\nSignal: {signal}\nTime: {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            
-            if "EXIT" in signal:
-                msg += "📌 Sinyal EXIT - Close posisi!\n"
-            else:
-                msg += "📌 Sinyal BUY - Entry posisi!\n"
-            
-            for tf in ["15m", "1h", "4h"]:
-                if tf in result.get("timeframes", {}):
-                    res = result["timeframes"][tf]
-                    msg += f"\n{tf.upper()}:\n"
-                    msg += f"  Action: {res.get('action', '')}\n"
-                    msg += f"  MACD: {res['macd']['dif']:.4f}\n"
-                    msg += f"  Hist: {res['macd']['histogram']:.4f}\n"
-                    msg += f"  Stoch K: {res['stoch']['k']:.1f}\n"
-                    msg += f"  Stoch D: {res['stoch']['d']:.1f}\n"
-                    msg += f"  RSI: {res['rsi']:.1f}\n"
-                    msg += f"  EMA100: {res.get('ema100', 0):.4f}\n"
-            
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            response = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
-            if response.status_code == 200:
-                st.session_state.sent_signals[signal_key] = True
-                st.session_state.last_telegram_time[symbol] = now
-                for key in list(st.session_state.sent_signals.keys()):
-                    try:
-                        ts_str = key.split('_')[-1]
-                        ts = datetime.strptime(ts_str, '%Y%m%d_%H%M')
-                        if (now - ts).seconds > 3600:
-                            del st.session_state.sent_signals[key]
-                    except:
-                        pass
-                return True
-    except Exception as e:
-        print(f"Telegram error: {e}")
-    return False
-
-def send_telegram_test(message):
-    try:
-        bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
-        if bot_token and chat_id:
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-            requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
-            return True
-    except:
-        pass
-    return False
-
-# =========================================================
-# FORMAT PRICE
-# =========================================================
-def format_price(value):
-    if pd.isna(value) or value is None:
-        return "-"
-    if value >= 1000:
-        return f"$ {value:,.2f}"
-    elif value >= 100:
-        return f"$ {value:,.3f}"
-    elif value >= 1:
-        return f"$ {value:,.4f}"
-    elif value >= 0.01:
-        return f"$ {value:,.6f}"
-    else:
-        return f"$ {value:,.8f}"
-
-# =========================================================
-# GET DATA (YAHOO FINANCE)
-# =========================================================
-@st.cache_data(ttl=30, show_spinner=False)
-def get_data(symbol, interval, period):
-    try:
-        ticker = f"{symbol}-USD"
-        df = yf.download(ticker, interval=interval, period=period, progress=False)
-        if df.empty:
-            ticker = symbol
-            df = yf.download(ticker, interval=interval, period=period, progress=False)
-        if df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df.reset_index()
-        df.rename(columns={df.columns[0]: "Time"}, inplace=True)
-        df["Time"] = pd.to_datetime(df["Time"])
-        return df
-    except:
-        return None
-
-def get_data_safe(symbol, interval, min_candles=20):
-    periods = {
-        "1m": ["1d", "5d", "7d"],
-        "5m": ["2d", "5d", "7d", "14d"],
-        "15m": ["5d", "7d", "14d", "30d"],
-        "30m": ["7d", "14d", "30d"],
-        "1h": ["7d", "14d", "30d", "60d"],
-        "4h": ["14d", "30d", "60d", "90d"],
-        "1d": ["30d", "60d", "90d", "1y"],
-    }
-    for period in periods.get(interval, ["7d", "14d", "30d"]):
-        df = get_data(symbol, interval, period)
-        if df is not None and len(df) >= min_candles:
-            return df
-    return None
-
-# =========================================================
 # INDIKATOR TEKNIKAL
 # =========================================================
 def EMA(df, period=20):
@@ -646,15 +163,291 @@ def StochasticRSI(df, period=14, smooth_k=3, smooth_d=3):
     d = k.rolling(smooth_d).mean()
     return k, d, rsi
 
+def ADX(df, period=14):
+    try:
+        adx = ADXIndicator(df["High"], df["Low"], df["Close"], window=period)
+        return adx.adx()
+    except:
+        return pd.Series([0] * len(df))
+
 # =========================================================
-# ALGORITMA TRADING SPOT - MACD + STOCHASTIC RSI
+# DETEKSI WHIPSAW
+# =========================================================
+def detect_whipsaw(df, lookback=20):
+    if df is None or len(df) < lookback + 5:
+        return {"is_whipsaw": False, "score": 0, "status": "🟢 CLEAR", "direction": "NONE", "reasons": [], "range_high": 0, "range_low": 0, "vol_ratio": 0, "adx": 0}
+    
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
+    
+    recent_high = high.tail(lookback).max()
+    recent_low = low.tail(lookback).min()
+    range_mid = (recent_high + recent_low) / 2
+    
+    current_close = close.iloc[-1]
+    high_last = high.iloc[-1]
+    low_last = low.iloc[-1]
+    
+    vol_ma = df["Volume"].rolling(10).mean().iloc[-1]
+    vol_ratio = df["Volume"].iloc[-1] / vol_ma if vol_ma > 0 else 1
+    
+    try:
+        bb = BollingerBands(close=df["Close"], window=20, window_dev=2)
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        bb_lower = bb.bollinger_lband().iloc[-1]
+    except:
+        bb_upper = recent_high * 1.05
+        bb_lower = recent_low * 0.95
+    
+    try:
+        adx = ADXIndicator(df["High"], df["Low"], df["Close"], window=14)
+        adx_now = adx.adx().iloc[-1] if not pd.isna(adx.adx().iloc[-1]) else 0
+    except:
+        adx_now = 0
+    
+    score = 0
+    reasons = []
+    direction = "NONE"
+    
+    # FALSE BREAKOUT ATAS
+    if high_last > recent_high * 1.005 or high_last > bb_upper:
+        if current_close < recent_high * 0.995:
+            score += 3
+            reasons.append("Fake breakout atas")
+            direction = "FAKE_UP"
+            if vol_ratio < 1.2:
+                score += 2
+                reasons.append("Volume rendah")
+            if adx_now < 25:
+                score += 1
+                reasons.append("ADX rendah")
+    
+    # FALSE BREAKOUT BAWAH
+    if low_last < recent_low * 0.995 or low_last < bb_lower:
+        if current_close > recent_low * 1.005:
+            score += 3
+            reasons.append("Fake breakout bawah")
+            direction = "FAKE_DOWN"
+            if vol_ratio < 1.2:
+                score += 2
+                reasons.append("Volume rendah")
+            if adx_now < 25:
+                score += 1
+                reasons.append("ADX rendah")
+    
+    if score >= 4:
+        is_whipsaw = True
+        status = "⚠️ WHIPSAW"
+    else:
+        is_whipsaw = False
+        status = "✅ CLEAR"
+    
+    return {
+        "is_whipsaw": is_whipsaw,
+        "score": score,
+        "status": status,
+        "direction": direction,
+        "reasons": reasons,
+        "range_high": float(recent_high),
+        "range_low": float(recent_low),
+        "vol_ratio": float(vol_ratio),
+        "adx": float(adx_now)
+    }
+
+# =========================================================
+# DETEKSI BOTTOM
+# =========================================================
+def detect_bottom(df, lookback=30):
+    if df is None or len(df) < lookback:
+        return {"is_bottom": False, "score": 0, "status": "⚪ NO BOTTOM", "reasons": [], "support": 0, "rsi": 50, "volume_ratio": 1}
+    
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    
+    current_price = close.iloc[-1]
+    recent_low = low.tail(lookback).min()
+    support_level = recent_low
+    near_support = current_price <= support_level * 1.02
+    
+    try:
+        _, _, rsi = StochasticRSI(df)
+        rsi_now = rsi.iloc[-1]
+    except:
+        rsi_now = 50
+    
+    try:
+        stoch_k, stoch_d, _ = StochasticRSI(df)
+        stoch_k_now = stoch_k.iloc[-1]
+        stoch_d_now = stoch_d.iloc[-1]
+        stoch_oversold = stoch_k_now < 20 and stoch_d_now < 20
+    except:
+        stoch_oversold = False
+    
+    try:
+        macd_line, signal_line, histogram = MACD(df)
+        hist_now = histogram.iloc[-1]
+        hist_prev = histogram.iloc[-2] if len(histogram) > 1 else hist_now
+        hist_improving = hist_now > hist_prev
+        macd_prev = macd_line.iloc[-2] if len(macd_line) > 1 else macd_line.iloc[-1]
+        signal_prev = signal_line.iloc[-2] if len(signal_line) > 1 else signal_line.iloc[-1]
+        macd_now = macd_line.iloc[-1]
+        signal_now = signal_line.iloc[-1]
+        golden_cross = (macd_prev < signal_prev) and (macd_now > signal_now)
+    except:
+        hist_improving = False
+        golden_cross = False
+    
+    vol_ma = df["Volume"].rolling(10).mean().iloc[-1]
+    vol_ratio = df["Volume"].iloc[-1] / vol_ma if vol_ma > 0 else 1
+    volume_spike = vol_ratio > 1.8
+    
+    score = 0
+    reasons = []
+    
+    if near_support:
+        score += 2
+        reasons.append(f"Near support ${support_level:.4f}")
+    
+    if rsi_now < 30:
+        score += 2
+        reasons.append(f"RSI oversold ({rsi_now:.1f})")
+    elif rsi_now < 40:
+        score += 1
+        reasons.append(f"RSI low ({rsi_now:.1f})")
+    
+    if stoch_oversold:
+        score += 2
+        reasons.append("Stoch oversold")
+    
+    if golden_cross:
+        score += 2
+        reasons.append("MACD golden cross")
+    
+    if hist_improving:
+        score += 1
+        reasons.append("Histogram improving")
+    
+    if volume_spike:
+        score += 1
+        reasons.append(f"Volume spike {vol_ratio:.1f}x")
+    
+    score = min(score, 10)
+    
+    if score >= 7:
+        status = "🔥 STRONG BOTTOM"
+        is_bottom = True
+    elif score >= 5:
+        status = "🟢 BOTTOM"
+        is_bottom = True
+    elif score >= 3:
+        status = "🟡 POTENTIAL BOTTOM"
+        is_bottom = False
+    else:
+        status = "⚪ NO BOTTOM"
+        is_bottom = False
+    
+    return {
+        "is_bottom": is_bottom,
+        "score": score,
+        "status": status,
+        "reasons": reasons,
+        "support": support_level,
+        "rsi": rsi_now,
+        "volume_ratio": vol_ratio,
+        "golden_cross": golden_cross
+    }
+
+# =========================================================
+# BOTTOM MOMENTUM SCORE (GABUNGAN)
+# =========================================================
+def calculate_bottom_momentum_score(result, df):
+    if df is None or len(df) < 30:
+        return {"total_score": 0, "bottom_score": 0, "momentum_score": 0, "status": "⚪ NO DATA", "action": "⏳ WAIT", "entry": False, "reasons": []}
+    
+    # BOTTOM SCORE
+    bottom = detect_bottom(df, lookback=30)
+    bottom_score = bottom["score"]
+    
+    # MOMENTUM SCORE
+    momentum_score = 0
+    momentum_reasons = []
+    
+    if result["macd"]["dif"] > result["macd"]["dea"]:
+        momentum_score += 1
+        momentum_reasons.append("MACD DIF > DEA")
+    if result["macd"]["golden_cross"]:
+        momentum_score += 1
+        momentum_reasons.append("⭐ MACD Golden Cross!")
+    if result["macd"]["hist_increasing"] and result["macd"]["hist_positive"]:
+        momentum_score += 1
+        momentum_reasons.append("Histogram menguat")
+    
+    if result["stoch"]["golden_cross"] and result["stoch"]["k"] < 40:
+        momentum_score += 2
+        momentum_reasons.append("⭐ Stoch Golden Cross!")
+    if result["stoch"]["k"] > result["stoch"]["d"]:
+        momentum_score += 1
+        momentum_reasons.append("Stoch K > D")
+    
+    if result.get("strong_bullish", False):
+        momentum_score += 2
+        momentum_reasons.append("Strong Bullish (EMA100+)")
+    elif result.get("bullish_trend", False):
+        momentum_score += 1
+        momentum_reasons.append("Bullish Trend")
+    
+    if result.get("volume_ratio", 0) > 1.5:
+        momentum_score += 1
+        momentum_reasons.append(f"Volume {result['volume_ratio']:.2f}x")
+    
+    rsi = result.get("rsi", 50)
+    if 30 <= rsi <= 60:
+        momentum_score += 1
+        momentum_reasons.append(f"RSI ideal ({rsi:.1f})")
+    
+    momentum_score = min(momentum_score, 10.0)
+    
+    # TOTAL SCORE
+    total_score = bottom_score + momentum_score
+    
+    # STATUS
+    if bottom_score >= 5 and momentum_score >= 5:
+        status = "🔥 STRONG BOTTOM MOMENTUM"
+        action = "🟢 STRONG BUY"
+        entry = True
+    elif bottom_score >= 4 and momentum_score >= 4:
+        status = "🟢 BOTTOM MOMENTUM"
+        action = "🟢 BUY"
+        entry = True
+    elif bottom_score >= 3 and momentum_score >= 3:
+        status = "🟡 POTENTIAL BOTTOM"
+        action = "⏳ WAIT"
+        entry = False
+    else:
+        status = "⚪ NO BOTTOM MOMENTUM"
+        action = "⏳ WAIT"
+        entry = False
+    
+    return {
+        "total_score": round(total_score, 1),
+        "bottom_score": round(bottom_score, 1),
+        "momentum_score": round(momentum_score, 1),
+        "status": status,
+        "action": action,
+        "entry": entry,
+        "reasons": bottom["reasons"] + momentum_reasons,
+        "bottom": bottom
+    }
+
+# =========================================================
+# ANALISIS UTAMA
 # =========================================================
 def analyze_macd_stoch_spot(df, timeframe=""):
-    """Versi SPOT - hanya BUY dan EXIT (tanpa SELL)"""
     if df is None or len(df) < 30:
         return None
     
-    # ========== HITUNG INDIKATOR DULU ==========
     macd_line, signal_line, histogram = MACD(df)
     stoch_k, stoch_d, rsi = StochasticRSI(df)
     ema20 = EMA(df, 20)
@@ -684,9 +477,6 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     ema50_val = ema50.iloc[-1]
     ema100_val = ema100.iloc[-1] if len(ema100) > 0 else price
     
-    # =========================================================
-    # DETEKSI SINYAL
-    # =========================================================
     macd_golden_cross = (macd_prev < signal_prev) and (macd_val > signal_val)
     macd_death_cross = (macd_prev > signal_prev) and (macd_val < signal_val)
     stoch_golden_cross = (stoch_k_prev < stoch_d_prev) and (stoch_k_val > stoch_d_val)
@@ -702,9 +492,7 @@ def analyze_macd_stoch_spot(df, timeframe=""):
     
     volume_confirmed = volume_ratio > 1.5
     
-    # =========================================================
     # BUY SCORE
-    # =========================================================
     buy_score = 0
     buy_reasons = []
     
@@ -755,9 +543,7 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         buy_score += 0.5
         buy_reasons.append(f"RSI sehat ({rsi_val:.1f}) ✅")
     
-    # =========================================================
     # EXIT SCORE
-    # =========================================================
     exit_score = 0
     exit_reasons = []
     
@@ -786,24 +572,37 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         exit_score += 0.5
         exit_reasons.append(f"RSI overbought ({rsi_val:.1f})")
     
-    # ========== TAMBAHKAN DETEKSI WHIPSAW ==========
-    whipsaw = detect_whipsaw(df, lookback=20, buffer_pct=0.5)
+    # BOTTOM MOMENTUM
+    bm = calculate_bottom_momentum_score(
+        {
+            "macd": {
+                "dif": macd_val,
+                "dea": signal_val,
+                "histogram": hist_val,
+                "golden_cross": macd_golden_cross,
+                "hist_increasing": hist_increasing,
+                "hist_positive": hist_positive
+            },
+            "stoch": {
+                "k": stoch_k_val,
+                "d": stoch_d_val,
+                "golden_cross": stoch_golden_cross
+            },
+            "strong_bullish": strong_bullish,
+            "bullish_trend": bullish_trend,
+            "volume_ratio": volume_ratio,
+            "rsi": rsi_val
+        },
+        df
+    )
     
-    # ========== MODIFIKASI SCORE BERDASARKAN WHIPSAW ==========
-    if whipsaw["is_whipsaw"]:
-        buy_score = max(0, buy_score - 3)
-        buy_reasons.append(f"⚠️ {whipsaw['status']}")
-        
-        if "FAKE_BREAKOUT_UP" in whipsaw["direction"]:
-            exit_score += 2
-            buy_reasons.append("🔴 Fake breakout up, bias bearish")
-        elif "FAKE_BREAKOUT_DOWN" in whipsaw["direction"]:
-            buy_score += 1
-            buy_reasons.append("🟢 Fake breakout down, bias bullish")
+    if bm["entry"]:
+        buy_score += bm["bottom_score"] * 0.5
+        buy_reasons.append(f"📉 {bm['status']}")
+        for reason in bm["reasons"]:
+            buy_reasons.append(f"  • {reason}")
     
-    # =========================================================
-    # KEPUTUSAN AKHIR
-    # =========================================================
+    # KEPUTUSAN
     action = "⏳ WAIT"
     signal_type = "HOLD"
     signal_strength = 0
@@ -862,7 +661,7 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         "is_buy": is_buy,
         "score": {"buy": buy_score, "exit": exit_score},
         "reasons": reasons,
-        "whipsaw": whipsaw,
+        "bottom_momentum": bm,
         "macd": {
             "dif": macd_val,
             "dea": signal_val,
@@ -890,10 +689,11 @@ def analyze_macd_stoch_spot(df, timeframe=""):
         "strong_bullish": strong_bullish
     }
 
+# =========================================================
+# MULTI TIMEFRAME
+# =========================================================
 def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
-    """Analisis multi timeframe untuk SPOT - 3 dari 3 bullish"""
     results = {}
-    
     for tf in timeframes:
         try:
             df = get_data_safe(symbol, tf, min_candles=50)
@@ -902,8 +702,7 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
                 if result:
                     result["symbol"] = symbol
                     results[tf] = result
-        except Exception as e:
-            print(f"Error getting data for {symbol} {tf}: {e}")
+        except:
             continue
     
     if not results:
@@ -914,9 +713,7 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
     sell_count = 0
     hold_count = 0
     
-    # ========== TAMBAHKAN UNTUK WHIPSAW ==========
-    whipsaw_scores = []
-    whipsaw_status = []
+    bm_scores = []
     
     for tf in ["4h", "1h", "15m"]:
         if tf in results:
@@ -928,53 +725,336 @@ def analyze_mtf_macd_stoch_spot(symbol, timeframes=["15m", "1h", "4h"]):
             else:
                 hold_count += 1
             
-            # Kumpulkan whipsaw dari setiap timeframe
-            if "whipsaw" in res:
-                whipsaw_scores.append(res["whipsaw"]["score"])
-                whipsaw_status.append(res["whipsaw"]["status"])
-    
-    # ========== WHIPSAW MULTI TIMEFRAME ==========
-    whipsaw_count = sum(1 for s in whipsaw_status if "WHIPSAW" in s or "FALSE" in s)
-    whipsaw_avg_score = sum(whipsaw_scores) / len(whipsaw_scores) if whipsaw_scores else 0
-    
-    combined["whipsaw_detected"] = whipsaw_count >= 2
-    combined["whipsaw_score"] = whipsaw_avg_score
-    combined["whipsaw_status"] = "🔴 WHIPSAW" if whipsaw_count >= 2 else "🟢 CLEAR"
+            if "bottom_momentum" in res:
+                bm_scores.append(res["bottom_momentum"]["total_score"])
     
     main_signal = "⏳ WAIT"
     main_strength = 0
+    avg_bm = sum(bm_scores) / len(bm_scores) if bm_scores else 0
     
-    if buy_count >= 3:
-        main_signal = "🟢 STRONG BUY (All TF Bullish)"
+    if buy_count >= 3 and avg_bm >= 10:
+        main_signal = "🔥 STRONG BOTTOM MOMENTUM (All TF)"
         main_strength = 3
-    elif buy_count == 2 and hold_count >= 1:
-        main_signal = "🟢 BUY (2 TF Bullish)"
+    elif buy_count >= 2 and avg_bm >= 8:
+        main_signal = "🟢 BOTTOM MOMENTUM (2 TF)"
         main_strength = 2
-    elif buy_count == 1 and hold_count >= 2:
-        main_signal = "🟡 CAUTION (Only 1 TF Bullish)"
+    elif buy_count == 1 and avg_bm >= 5:
+        main_signal = "🟡 POTENTIAL BOTTOM"
         main_strength = 1
     elif sell_count >= 2:
         main_signal = "🔴 EXIT (Multi TF)"
         main_strength = 3
-    elif sell_count == 1 and hold_count >= 1:
-        main_signal = "🔴 CAUTION EXIT"
-        main_strength = 2
     else:
         main_signal = "🟡 HOLD / WAIT"
         main_strength = 1
-    
-    if combined["whipsaw_detected"]:
-        main_strength = max(1, main_strength - 1)
-        main_signal += " ⚠️ WHIPSAW"
     
     combined["main_signal"] = main_signal
     combined["main_strength"] = main_strength
     combined["buy_count"] = buy_count
     combined["sell_count"] = sell_count
     combined["hold_count"] = hold_count
-    combined["total_score"] = 50 + (buy_count * 10)
+    combined["avg_bottom_momentum"] = avg_bm
     
     return combined
+
+# =========================================================
+# GET DATA
+# =========================================================
+@st.cache_data(ttl=30, show_spinner=False)
+def get_data(symbol, interval, period):
+    try:
+        ticker = f"{symbol}-USD"
+        df = yf.download(ticker, interval=interval, period=period, progress=False)
+        if df.empty:
+            ticker = symbol
+            df = yf.download(ticker, interval=interval, period=period, progress=False)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.reset_index()
+        df.rename(columns={df.columns[0]: "Time"}, inplace=True)
+        df["Time"] = pd.to_datetime(df["Time"])
+        return df
+    except:
+        return None
+
+def get_data_safe(symbol, interval, min_candles=20):
+    periods = {
+        "1m": ["1d", "5d", "7d"],
+        "5m": ["2d", "5d", "7d", "14d"],
+        "15m": ["5d", "7d", "14d", "30d"],
+        "30m": ["7d", "14d", "30d"],
+        "1h": ["7d", "14d", "30d", "60d"],
+        "4h": ["14d", "30d", "60d", "90d"],
+        "1d": ["30d", "60d", "90d", "1y"],
+    }
+    for period in periods.get(interval, ["7d", "14d", "30d"]):
+        df = get_data(symbol, interval, period)
+        if df is not None and len(df) >= min_candles:
+            return df
+    return None
+
+# =========================================================
+# DATABASE FUNCTIONS
+# =========================================================
+def get_watchlist():
+    supabase = get_supabase()
+    try:
+        res = supabase.table("watchlist").select("symbol").order("added_at").execute()
+        return [row["symbol"] for row in res.data] if res.data else ["BTC", "ETH", "SOL", "XRP", "ADA"]
+    except:
+        return ["BTC", "ETH", "SOL", "XRP", "ADA"]
+
+def add_coin(symbol):
+    supabase = get_supabase()
+    try:
+        supabase.table("watchlist").insert({"symbol": symbol.upper()}).execute()
+        return True
+    except:
+        return False
+
+def remove_coin(symbol):
+    supabase = get_supabase()
+    try:
+        res = supabase.table("watchlist").delete().eq("symbol", symbol.upper()).execute()
+        return len(res.data) > 0
+    except:
+        return False
+
+def save_signal(data):
+    supabase = get_supabase()
+    try:
+        symbol = data.get("symbol")
+        signal = data.get("signal")
+        five_min_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
+        res = supabase.table("signal_history").select("id").eq("symbol", symbol).eq("signal", signal).gte("timestamp", five_min_ago).execute()
+        if res.data and len(res.data) > 0:
+            return False
+        data["timestamp"] = datetime.now().isoformat()
+        supabase.table("signal_history").insert(data).execute()
+        return True
+    except:
+        return False
+
+def get_signal_history(limit=100):
+    supabase = get_supabase()
+    try:
+        res = supabase.table("signal_history").select("*").order("timestamp", desc=True).limit(limit).execute()
+        return res.data
+    except:
+        return []
+
+def update_performance(stats):
+    supabase = get_supabase()
+    try:
+        supabase.table("performance").upsert({"key": "performance_stats", "value": stats, "updated_at": datetime.now().isoformat()}, on_conflict="key").execute()
+        return True
+    except:
+        return False
+
+def get_performance():
+    supabase = get_supabase()
+    default = {"total_signals": 0, "wins": 0, "losses": 0, "total_profit": 0, "win_rate": 0}
+    try:
+        res = supabase.table("performance").select("value").eq("key", "performance_stats").execute()
+        if res.data and len(res.data) > 0:
+            return res.data[0]["value"]
+        return default
+    except:
+        return default
+
+# =========================================================
+# POSITIONS DATABASE FUNCTIONS
+# =========================================================
+def save_position_to_db(symbol, entry, sl, tp, position_size=1):
+    supabase = get_supabase()
+    try:
+        data = {
+            "symbol": symbol,
+            "entry_price": float(entry),
+            "current_price": float(entry),
+            "stop_loss": float(sl),
+            "take_profit": float(tp),
+            "highest_price": float(entry),
+            "position_size": float(position_size),
+            "entry_time": datetime.now().isoformat(),
+            "status": "OPEN",
+            "pnl": 0,
+            "pnl_percent": 0
+        }
+        result = supabase.table("positions").insert(data).execute()
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
+    except:
+        return None
+
+def get_open_positions_from_db():
+    supabase = get_supabase()
+    try:
+        res = supabase.table("positions").select("*").eq("status", "OPEN").order("entry_time", desc=True).execute()
+        return res.data if res.data else []
+    except:
+        return []
+
+def get_closed_positions_from_db(limit=100):
+    supabase = get_supabase()
+    try:
+        res = supabase.table("positions").select("*").eq("status", "CLOSED").order("exit_time", desc=True).limit(limit).execute()
+        return res.data if res.data else []
+    except:
+        return []
+
+def update_position_in_db(position_id, updates):
+    supabase = get_supabase()
+    try:
+        updates["updated_at"] = datetime.now().isoformat()
+        supabase.table("positions").update(updates).eq("id", position_id).execute()
+        return True
+    except:
+        return False
+
+def close_position_in_db(position_id, exit_price, exit_reason, pnl, pnl_percent):
+    supabase = get_supabase()
+    try:
+        updates = {
+            "status": "CLOSED",
+            "current_price": float(exit_price),
+            "exit_price": float(exit_price),
+            "exit_reason": exit_reason,
+            "pnl": float(pnl),
+            "pnl_percent": float(pnl_percent),
+            "exit_time": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        }
+        supabase.table("positions").update(updates).eq("id", position_id).execute()
+        return True
+    except:
+        return False
+
+def get_portfolio_summary():
+    supabase = get_supabase()
+    try:
+        open_positions = get_open_positions_from_db()
+        closed_positions = get_closed_positions_from_db(limit=100)
+        total_equity = sum([p.get("current_price", 0) * p.get("position_size", 1) for p in open_positions])
+        unrealized_pnl = sum([p.get("pnl", 0) for p in open_positions])
+        realized_pnl = sum([p.get("pnl", 0) for p in closed_positions])
+        total_pnl = unrealized_pnl + realized_pnl
+        total_closed = len(closed_positions)
+        wins = len([p for p in closed_positions if p.get("pnl", 0) > 0])
+        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+        return {
+            "open_positions": open_positions,
+            "closed_positions": closed_positions,
+            "total_open": len(open_positions),
+            "total_closed": total_closed,
+            "total_equity": total_equity,
+            "wins": wins,
+            "losses": total_closed - wins,
+            "win_rate": win_rate,
+            "unrealized_pnl": unrealized_pnl,
+            "realized_pnl": realized_pnl,
+            "total_pnl": total_pnl
+        }
+    except:
+        return {"open_positions": [], "closed_positions": [], "total_open": 0, "total_closed": 0, "total_equity": 0, "wins": 0, "losses": 0, "win_rate": 0, "unrealized_pnl": 0, "realized_pnl": 0, "total_pnl": 0}
+
+# =========================================================
+# TELEGRAM FUNCTIONS
+# =========================================================
+if "sent_signals" not in st.session_state:
+    st.session_state.sent_signals = {}
+if "last_telegram_time" not in st.session_state:
+    st.session_state.last_telegram_time = {}
+
+def send_telegram_once(symbol, signal, result):
+    now = datetime.now()
+    last_time = st.session_state.last_telegram_time.get(symbol)
+    if last_time is not None and (now - last_time).seconds / 60 < 10:
+        return False
+    signal_key = f"{symbol}_{signal}_{now.strftime('%Y%m%d_%H%M')}"
+    if signal_key in st.session_state.sent_signals:
+        return False
+    try:
+        bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
+        if bot_token and chat_id:
+            msg = f"⚡ BOTTOM MOMENTUM SIGNAL!\n\nCoin: {symbol}\nSignal: {signal}\nTime: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            response = requests.post(url, json={"chat_id": chat_id, "text": msg}, timeout=10)
+            if response.status_code == 200:
+                st.session_state.sent_signals[signal_key] = True
+                st.session_state.last_telegram_time[symbol] = now
+                return True
+    except:
+        pass
+    return False
+
+def send_telegram_test(message):
+    try:
+        bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
+        if bot_token and chat_id:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=10)
+            return True
+    except:
+        pass
+    return False
+
+# =========================================================
+# CHECK EXIT CONDITIONS
+# =========================================================
+def check_exit_conditions(position, df, highest_price=None):
+    if df is None or len(df) < 10:
+        return None, None
+    price = df["Close"].iloc[-1]
+    macd_line, signal_line, histogram = MACD(df)
+    stoch_k, stoch_d, _ = StochasticRSI(df)
+    if position.get("tp") and price >= position["tp"]:
+        return "✅ TP HIT", price
+    if position.get("sl") and price <= position["sl"]:
+        return "❌ SL HIT", price
+    if highest_price and price <= highest_price * 0.95:
+        return "📉 TRAILING SL", price
+    if len(macd_line) > 1 and len(stoch_k) > 1:
+        macd_death = (macd_line.iloc[-2] > signal_line.iloc[-2]) and (macd_line.iloc[-1] < signal_line.iloc[-1])
+        stoch_death = (stoch_k.iloc[-2] > stoch_d.iloc[-2]) and (stoch_k.iloc[-1] < stoch_d.iloc[-1])
+        if macd_death and stoch_death:
+            return "🔄 REVERSAL EXIT", price
+    entry_time = position.get("entry_time")
+    if entry_time:
+        if isinstance(entry_time, str):
+            try:
+                entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+            except:
+                try:
+                    entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
+                except:
+                    entry_time = None
+        if entry_time and isinstance(entry_time, datetime) and (datetime.now() - entry_time).days > 7:
+            return "⏰ TIME EXIT (7 days)", price
+    return None, price
+
+# =========================================================
+# FORMAT PRICE
+# =========================================================
+def format_price(value):
+    if pd.isna(value) or value is None:
+        return "-"
+    if value >= 1000:
+        return f"$ {value:,.2f}"
+    elif value >= 100:
+        return f"$ {value:,.3f}"
+    elif value >= 1:
+        return f"$ {value:,.4f}"
+    elif value >= 0.01:
+        return f"$ {value:,.6f}"
+    else:
+        return f"$ {value:,.8f}"
+
 # =========================================================
 # CREATE CHART
 # =========================================================
@@ -987,42 +1067,33 @@ def create_chart(df, symbol, timeframe):
     ema50 = EMA(df, 50)
     ema100 = EMA(df, 100)
     
-    fig = make_subplots(
-        rows=4, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.35, 0.2, 0.25, 0.2],
-        subplot_titles=(f"Price - {symbol} {timeframe}", "RSI", "MACD", "Stochastic RSI")
-    )
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        row_heights=[0.35, 0.2, 0.25, 0.2],
+                        subplot_titles=(f"Price - {symbol} {timeframe}", "RSI", "MACD", "Stochastic RSI"))
     
-    # Price + EMA
     fig.add_trace(go.Candlestick(x=df["Time"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
                                  increasing_line_color="#00ff88", decreasing_line_color="#ff3b5c", name="Price"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["Time"], y=ema20, line=dict(color="#00a2ff", width=1.5), name="EMA20"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["Time"], y=ema50, line=dict(color="#ffaa00", width=1.5, dash="dash"), name="EMA50"), row=1, col=1)
     fig.add_trace(go.Scatter(x=df["Time"], y=ema100, line=dict(color="#ff00ff", width=1.5, dash="dot"), name="EMA100"), row=1, col=1)
     
-    # RSI
     fig.add_trace(go.Scatter(x=df["Time"], y=rsi, line=dict(color="#a855f7", width=2), name="RSI"), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
     
-    # MACD
     fig.add_trace(go.Scatter(x=df["Time"], y=macd_line, line=dict(color="#00a2ff", width=1.5), name="DIF (MACD)"), row=3, col=1)
     fig.add_trace(go.Scatter(x=df["Time"], y=signal_line, line=dict(color="#ff00ff", width=1.5), name="DEA (Signal)"), row=3, col=1)
     colors = ["#00ff88" if h >= 0 else "#ff3b5c" for h in histogram]
     fig.add_trace(go.Bar(x=df["Time"], y=histogram, marker_color=colors, opacity=0.5, name="Histogram"), row=3, col=1)
     fig.add_hline(y=0, line_dash="solid", line_color="rgba(255,255,255,0.2)", row=3, col=1)
     
-    # Stochastic RSI
     fig.add_trace(go.Scatter(x=df["Time"], y=stoch_k, line=dict(color="#ffaa00", width=1.5), name="Stoch K"), row=4, col=1)
     fig.add_trace(go.Scatter(x=df["Time"], y=stoch_d, line=dict(color="#ff00ff", width=1.5, dash="dash"), name="Stoch D"), row=4, col=1)
     fig.add_hline(y=80, line_dash="dash", line_color="red", row=4, col=1)
     fig.add_hline(y=20, line_dash="dash", line_color="green", row=4, col=1)
     
     fig.update_layout(template="plotly_dark", height=900,
-                      title=dict(text=f"<b>{symbol} - {timeframe} Analysis (SPOT)</b>", font=dict(color="#f1f5f9", size=20),
-                                 x=0.5, xanchor="center"),
+                      title=dict(text=f"<b>{symbol} - {timeframe} Analysis (Bottom Momentum)</b>", font=dict(color="#f1f5f9", size=20), x=0.5, xanchor="center"),
                       hovermode="x unified", dragmode="pan", xaxis_rangeslider_visible=False,
                       paper_bgcolor="#0a0a1a", plot_bgcolor="#0a0a1a", font=dict(color="#94a3b8"),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)),
@@ -1030,56 +1101,6 @@ def create_chart(df, symbol, timeframe):
     fig.update_xaxes(gridcolor="rgba(255,255,255,0.03)")
     fig.update_yaxes(gridcolor="rgba(255,255,255,0.03)")
     return fig
-
-def check_exit_conditions(position, df, highest_price=None):
-    """Cek kondisi exit untuk posisi yang sudah masuk (Spot)"""
-    if df is None or len(df) < 10:
-        return None, None
-    
-    price = df["Close"].iloc[-1]
-    macd_line, signal_line, histogram = MACD(df)
-    stoch_k, stoch_d, _ = StochasticRSI(df)
-    
-    # 1. Take Profit
-    if position.get("tp") and price >= position["tp"]:
-        return "✅ TP HIT", price
-    
-    # 2. Stop Loss
-    if position.get("sl") and price <= position["sl"]:
-        return "❌ SL HIT", price
-    
-    # 3. Trailing Stop (5% dari highest)
-    if highest_price:
-        trailing_sl = highest_price * 0.95
-        if price <= trailing_sl:
-            return "📉 TRAILING SL", price
-    
-    # 4. MACD Death Cross + Stoch Death Cross
-    if len(macd_line) > 1 and len(stoch_k) > 1:
-        macd_death = (macd_line.iloc[-2] > signal_line.iloc[-2]) and (macd_line.iloc[-1] < signal_line.iloc[-1])
-        stoch_death = (stoch_k.iloc[-2] > stoch_d.iloc[-2]) and (stoch_k.iloc[-1] < stoch_d.iloc[-1])
-        if macd_death and stoch_death:
-            return "🔄 REVERSAL EXIT", price
-    
-    # 5. Time-based exit (7 hari)
-    entry_time = position.get("entry_time")
-    if entry_time:
-        # Pastikan entry_time adalah datetime
-        if isinstance(entry_time, str):
-            try:
-                entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
-            except:
-                try:
-                    entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S.%f')
-                except:
-                    entry_time = None
-        
-        if entry_time and isinstance(entry_time, datetime):
-            holding_days = (datetime.now() - entry_time).days
-            if holding_days > 7:
-                return "⏰ TIME EXIT (7 days)", price
-    
-    return None, price
 
 # =========================================================
 # INITIALIZATION
@@ -1092,21 +1113,15 @@ if "signal_history" not in st.session_state:
     st.session_state.signal_history = get_signal_history()
 if "performance_stats" not in st.session_state:
     st.session_state.performance_stats = get_performance()
-
 if "positions" not in st.session_state:
     st.session_state.positions = {}
-
-# 🔥 TAMBAHKAN INI UNTUK KONTROL REFRESH
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = datetime.now()
 if "last_scan" not in st.session_state:
     st.session_state.last_scan = datetime.now()
-if "is_processing" not in st.session_state:
-    st.session_state.is_processing = False
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = []
 
-# 🔥 LOAD POSITIONS DARI DATABASE
 if not st.session_state.positions:
     try:
         db_positions = get_open_positions_from_db()
@@ -1124,14 +1139,11 @@ if not st.session_state.positions:
         pass
 
 # =========================================================
-# MAIN TITLE
-# =========================================================
-st.title("🤖")
-st.caption("Multi Timeframe: 15M | 1H | 4H | MACD + Stochastic RSI + EMA100 | BUY & EXIT Only")
-
-# =========================================================
 # SIDEBAR
 # =========================================================
+st.title("📊 Bottom Momentum Scanner PRO")
+st.caption("Multi Timeframe: 15M | 1H | 4H | Bottom Detection + Momentum Score | Buy from Bottom")
+
 with st.sidebar:
     st.header("⚙️ Settings")
     st.subheader("📋 Watchlist")
@@ -1166,14 +1178,14 @@ with st.sidebar:
                     st.error(f"❌ Gagal hapus {coin}!")
     
     st.divider()
-    st.subheader("📊 Trading Settings")
+    st.subheader("📊 Scanner Settings")
     refresh = st.slider("🔄 Refresh (detik)", 15, 120, 30)
     hold_minutes = st.slider("Hold Signal (menit)", 5, 30, 15, key="hold_minutes")
     
     st.divider()
     st.subheader("📱 Telegram Alert")
     if st.button("🚀 Test Telegram", use_container_width=True):
-        send_telegram_test("🚀 Telegram Connected! SPOT Scanner Aktif.")
+        send_telegram_test("🚀 Telegram Connected! Bottom Momentum Scanner Aktif.")
         st.success("✅ Pesan test terkirim!")
     
     st.divider()
@@ -1183,7 +1195,7 @@ with st.sidebar:
     st.metric("Total Signals", stats.get('total_signals', 0))
     st.metric("Open Positions", len(st.session_state.positions))
     st.caption(f"🔄 Auto Refresh: {refresh} detik")
-    st.caption("📌 Mode: SPOT (BUY & EXIT Only)")
+    st.caption("📌 Mode: Bottom Momentum Scanner")
 
 # =========================================================
 # AUTO REFRESH
@@ -1197,33 +1209,31 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 Scanner", "📈 Chart Analysis", "📋 Positions", "📜 History", "📊 Performance"
 ])
 
-# ==================== TAB 1: SCANNER ====================
+# =========================================================
+# TAB 1: SCANNER
+# =========================================================
 with tab1:
-    st.subheader("📊 Signal Scanner - SPOT (BUY & EXIT)")
+    st.subheader("📊 Bottom Momentum Scanner")
+    st.caption("Mencari koin di titik terendah yang sudah mulai momentum - BELI DARI BAWAH")
     
-    # ========== CEK APAKAH PERLU SCAN ==========
     now = datetime.now()
     time_since_scan = (now - st.session_state.get("last_scan", now)).seconds
     
-    # Hanya scan jika sudah lewat 30 detik
     if time_since_scan > 30 or "last_scan" not in st.session_state:
         st.session_state.last_scan = now
-        
         all_signals = []
         progress_bar = st.progress(0)
         status_text = st.empty()
-
-        # Hapus pending signal yang kadaluarsa
+        
         current_time = datetime.now()
         expired = []
         for symbol, data in st.session_state.pending_signal.items():
-            elapsed = (current_time - data["time"]).seconds / 60
-            if elapsed > hold_minutes:
+            if (current_time - data["time"]).seconds / 60 > hold_minutes:
                 expired.append(symbol)
         for sym in expired:
             if sym in st.session_state.pending_signal:
                 del st.session_state.pending_signal[sym]
-
+        
         coins_to_scan = st.session_state.watchlist[:50]
         total_coins = len(coins_to_scan)
         
@@ -1235,22 +1245,17 @@ with tab1:
                 result = analyze_mtf_macd_stoch_spot(symbol, ["15m", "1h", "4h"])
                 
                 if result:
+                    df_1h = get_data_safe(symbol, "1h", min_candles=30)
+                    bm = detect_bottom(df_1h) if df_1h is not None else {"score": 0, "status": "⚪ N/A"}
+                    
                     signal_data = {
                         "Coin": symbol,
                         "Signal": result["main_signal"],
                         "Strength": "⭐" * result.get("main_strength", 1),
+                        "Bottom Score": f"{bm['score']}/10",
+                        "Bottom Status": bm["status"],
+                        "Avg BM": f"{result.get('avg_bottom_momentum', 0):.1f}",
                     }
-                    # ========== TAMBAHKAN INI ==========
-                    # Deteksi whipsaw untuk coin ini
-                    df_15m = get_data_safe(symbol, "15m", min_candles=30)
-                    if df_15m is not None:
-                        ws = detect_whipsaw(df_15m)
-                        signal_data["Whipsaw"] = ws["status"]
-                        signal_data["Whipsaw Score"] = ws["score"]
-                    else:
-                        signal_data["Whipsaw"] = "❓ N/A"
-                        signal_data["Whipsaw Score"] = 0
-                    # ==================================
                     
                     for tf in ["15m", "1h", "4h"]:
                         if tf in result["timeframes"]:
@@ -1261,16 +1266,14 @@ with tab1:
                             signal_data[f"{tf.upper()} Stoch K"] = f"{res['stoch']['k']:.1f}"
                             signal_data[f"{tf.upper()} Stoch D"] = f"{res['stoch']['d']:.1f}"
                             signal_data[f"{tf.upper()} RSI"] = f"{res['rsi']:.1f}"
-                            signal_data[f"{tf.upper()} EMA100"] = f"{res.get('ema100', 0):.4f}"
                     
                     all_signals.append(signal_data)
-
-                    # CEK POSISI DI DATABASE
-                    existing_positions = get_open_positions_from_db()
-                    existing_symbols = [p["symbol"] for p in existing_positions]
                     
-                    # SIMPAN POSISI JIKA BUY
+                    # BUY ENTRY
                     if result["main_strength"] >= 2 and "BUY" in result["main_signal"]:
+                        existing_positions = get_open_positions_from_db()
+                        existing_symbols = [p["symbol"] for p in existing_positions]
+                        
                         if symbol not in st.session_state.pending_signal and symbol not in existing_symbols:
                             df_5m = get_data_safe(symbol, "5m", min_candles=20)
                             if df_5m is not None:
@@ -1278,11 +1281,9 @@ with tab1:
                                 atr = AverageTrueRange(df_5m["High"], df_5m["Low"], df_5m["Close"], window=14).average_true_range().iloc[-1]
                                 if pd.isna(atr) or atr == 0:
                                     atr = price * 0.01
-                                
                                 entry = price
                                 sl = entry - atr * 3
                                 tp = entry + atr * 7
-                                position_size = 1
                                 
                                 st.session_state.pending_signal[symbol] = {
                                     "signal": result["main_signal"],
@@ -1293,7 +1294,7 @@ with tab1:
                                     "timeframe": "5m"
                                 }
                                 
-                                saved_pos = save_position_to_db(symbol, entry, sl, tp, position_size)
+                                saved_pos = save_position_to_db(symbol, entry, sl, tp, 1)
                                 if saved_pos:
                                     st.session_state.positions[symbol] = {
                                         "entry": entry,
@@ -1302,7 +1303,7 @@ with tab1:
                                         "entry_time": datetime.now(),
                                         "highest_price": entry,
                                         "id": saved_pos["id"],
-                                        "position_size": position_size
+                                        "position_size": 1
                                     }
                                     st.success(f"✅ Position opened for {symbol} at ${entry:.4f}")
                                     
@@ -1324,7 +1325,6 @@ with tab1:
                                         del st.session_state.pending_signal[symbol]
                                     st.error(f"❌ Gagal membuka posisi untuk {symbol}")
                     
-                    # SIMPAN EXIT
                     elif "EXIT" in result["main_signal"] and symbol in st.session_state.positions:
                         sent = send_telegram_once(symbol, result["main_signal"], result)
                         if sent:
@@ -1337,35 +1337,63 @@ with tab1:
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
-
+        
         progress_bar.empty()
         status_text.empty()
-        
-        # Simpan hasil scan ke session state
         st.session_state.scan_results = all_signals
     else:
-        # Gunakan hasil scan sebelumnya
         all_signals = st.session_state.get("scan_results", [])
-
-    # ========== TAMPILKAN HASIL ==========
+    
     if all_signals:
         df_signals = pd.DataFrame(all_signals)
         st.dataframe(df_signals, use_container_width=True, hide_index=True)
         
+        # ========== TOP BOTTOM MOMENTUM PICKS ==========
+        st.divider()
+        st.subheader("🏆 Best Bottom Momentum Picks")
+        
+        df_filtered = df_signals[df_signals["Bottom Score"].str.replace("/10", "").astype(float) >= 4]
+        if not df_filtered.empty:
+            st.success(f"🔥 Found {len(df_filtered)} bottom opportunities!")
+            
+            for _, row in df_filtered.iterrows():
+                bottom_score = float(row["Bottom Score"].replace("/10", ""))
+                if bottom_score >= 7:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, rgba(0,255,136,0.25), rgba(0,255,136,0.05)); 
+                                border: 2px solid #00ff88; border-radius: 12px; padding: 16px; margin: 8px 0;">
+                        <b style="color: #00ff88; font-size: 20px;">🚀 {row['Coin']}</b>
+                        <span style="color: #00ff88; font-size: 18px;">{row['Signal']}</span><br>
+                        Bottom Score: <b style="color: #00ff88;">{row['Bottom Score']}</b> | 
+                        Status: {row['Bottom Status']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif bottom_score >= 5:
+                    st.markdown(f"""
+                    <div style="background: linear-gradient(135deg, rgba(255,170,0,0.2), rgba(255,170,0,0.05)); 
+                                border: 1px solid #ffaa00; border-radius: 12px; padding: 14px; margin: 6px 0;">
+                        <b style="color: #ffaa00; font-size: 18px;">🟢 {row['Coin']}</b>
+                        <span style="color: #ffaa00;">{row['Signal']}</span><br>
+                        Bottom Score: <b style="color: #ffaa00;">{row['Bottom Score']}</b>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            best = df_filtered.iloc[0]
+            st.success(f"🏆 **BEST BOTTOM PICK: {best['Coin']}** | Bottom Score: {best['Bottom Score']}")
+        else:
+            st.info("ℹ️ No bottom opportunities found yet")
+        
         buy_signals = [s for s in all_signals if "BUY" in s["Signal"]]
         if buy_signals:
             best = buy_signals[0]
-            st.success(f"🏆 Best Buy Signal: **{best['Coin']}** | {best['Signal']}")
-        else:
-            st.info("ℹ️ Tidak ada sinyal BUY saat ini")
+            st.info(f"📈 Best Buy Signal: **{best['Coin']}** | {best['Signal']}")
     else:
         st.info("ℹ️ Tidak ada data")
-
-    # ========== TAMPILAN PENDING SIGNALS ==========
+    
     if st.session_state.pending_signal:
         st.divider()
         st.subheader("⏳ Pending Signals - Entry, TP, SL")
-        st.caption("Sinyal BUY yang masih aktif menunggu eksekusi")
+        st.caption("Sinyal BUY yang masih aktif")
         
         pending_data = []
         for symbol, data in st.session_state.pending_signal.items():
@@ -1374,11 +1402,7 @@ with tab1:
             entry = data.get("entry")
             sl = data.get("sl")
             tp = data.get("tp")
-            
-            if entry and sl and tp:
-                rr = (tp - entry) / (entry - sl) if (entry - sl) != 0 else 0
-            else:
-                rr = 0
+            rr = (tp - entry) / (entry - sl) if entry and sl and tp and (entry - sl) != 0 else 0
             
             pending_data.append({
                 "Coin": symbol,
@@ -1388,15 +1412,17 @@ with tab1:
                 "SL": format_price(sl),
                 "RR": f"{rr:.2f}",
                 "Time Left": f"{remaining:.0f}m",
-                "Timeframe": data.get("timeframe", "5m")
             })
         
         if pending_data:
             df_pending = pd.DataFrame(pending_data)
             st.dataframe(df_pending, use_container_width=True, hide_index=True)
-# ==================== TAB 2: CHART ANALYSIS ====================
+
+# =========================================================
+# TAB 2: CHART ANALYSIS
+# =========================================================
 with tab2:
-    st.subheader("📈 Chart Analysis - SPOT")
+    st.subheader("📈 Chart Analysis - Bottom Momentum")
     chart_coin = st.selectbox("Select Coin", st.session_state.watchlist, key="chart_select")
     chart_tf = st.selectbox("Timeframe", ["15m", "1h", "4h"], index=1)
     
@@ -1406,78 +1432,55 @@ with tab2:
             result = analyze_macd_stoch_spot(df, chart_tf)
             if result:
                 col1, col2, col3, col4 = st.columns(4)
-                
                 if "BUY" in result["action"]:
                     signal_html = f'<div class="signal-buy">{result["action"]}</div>'
                 elif "EXIT" in result["action"]:
                     signal_html = f'<div class="signal-exit">{result["action"]}</div>'
                 else:
                     signal_html = f'<div class="signal-hold">{result["action"]}</div>'
-                
                 col1.markdown(signal_html, unsafe_allow_html=True)
                 col2.metric("MACD DIF", f"{result['macd']['dif']:.4f}")
                 col3.metric("MACD DEA", f"{result['macd']['dea']:.4f}")
                 col4.metric("Histogram", f"{result['macd']['histogram']:.4f}")
                 
                 col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Stoch K", f"{result['stoch']['k']:.1f}")
-                col2.metric("Stoch D", f"{result['stoch']['d']:.1f}")
-                col3.metric("RSI", f"{result['rsi']:.1f}")
-                col4.metric("Volume Ratio", f"{result['volume_ratio']:.2f}x")
+                bm = result.get("bottom_momentum", {})
+                col1.metric("Bottom Score", f"{bm.get('bottom_score', 0):.1f}/10")
+                col2.metric("Momentum Score", f"{bm.get('momentum_score', 0):.1f}/10")
+                col3.metric("Total Score", f"{bm.get('total_score', 0):.1f}/20")
+                col4.metric("RSI", f"{result['rsi']:.1f}")
                 
                 with st.expander("📋 Signal Details", expanded=True):
                     if result["reasons"]:
                         for reason in result["reasons"]:
                             st.write(f"• {reason}")
                     
-                    # ========== WHIPSAW DETECTION ==========
-                    ws = detect_whipsaw(df)
-                    st.write(f"**Whipsaw Status:** {ws['status']}")
-                    st.write(f"**Whipsaw Score:** {ws['score']}/10")
-                    if ws["reasons"]:
-                        st.write("**Whipsaw Reasons:**")
-                        for reason in ws["reasons"]:
-                            st.write(f"  • {reason}")
-                    st.write(f"**Range:** ${ws['range_low']:.4f} - ${ws['range_high']:.4f}")
-                    st.write(f"**ADX:** {ws['adx']:.1f} | **Volume Ratio:** {ws['vol_ratio']:.2f}x")
-                    # =========================================
-                
- 
+                    if bm.get("status"):
+                        st.write(f"**Bottom Momentum Status:** {bm['status']}")
+                    
                     st.write(f"**Trend:** {'🟢 Strong Bullish (EMA100+)' if result['strong_bullish'] else '🟢 Bullish' if result['bullish_trend'] else '🔴 Bearish' if result['bearish_trend'] else '🟡 Sideways'}")
                     st.write(f"**EMA20:** {result['ema20']:.4f}")
                     st.write(f"**EMA50:** {result['ema50']:.4f}")
                     st.write(f"**EMA100:** {result['ema100']:.4f}")
                     st.write(f"**Buy Score:** {result['score']['buy']:.1f} | **Exit Score:** {result['score']['exit']:.1f}")
-        
-                    st.write(f"**Range:** ${ws['range_low']:.4f} - ${ws['range_high']:.4f}")
-                    st.write(f"**ADX:** {ws['adx']:.1f} | **Volume Ratio:** {ws['vol_ratio']:.2f}x")
-                    fig = create_chart(df, chart_coin, chart_tf)
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
+                
+                fig = create_chart(df, chart_coin, chart_tf)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error(f"❌ Tidak bisa mendapatkan data untuk {chart_coin}")
 
-# ==================== TAB 3: POSITIONS ====================
-# ==================== TAB 3: POSITIONS ====================
+# =========================================================
+# TAB 3: POSITIONS
+# =========================================================
 with tab3:
     st.subheader("📋 Open Positions - SPOT")
     
-    # ========== CEK APAKAH PERLU UPDATE ==========
     now = datetime.now()
     time_since_refresh = (now - st.session_state.get("last_refresh", now)).seconds
-    show_whipsaw = st.checkbox("⚠️ Show whipsaw positions", value=False)
     
-    if not show_whipsaw:
-        # Filter posisi yang tidak whipsaw
-        # (Ini hanya contoh, sesuaikan dengan logika Anda)
-        pass
-    # =============================================
-    
-    # Hanya update jika sudah lewat 30 detik atau positions kosong
     if time_since_refresh > 30 or not st.session_state.positions:
         st.session_state.last_refresh = now
-        
-        # ========== UPDATE POSISI ==========
         updated_positions = {}
         positions_to_remove = []
         
@@ -1505,32 +1508,18 @@ with tab3:
                 elif entry_time is None:
                     entry_time = datetime.now()
                 
-                position_for_exit = {
-                    "entry": pos["entry"],
-                    "sl": pos.get("sl"),
-                    "tp": pos.get("tp"),
-                    "entry_time": entry_time
-                }
-                
-                exit_signal, exit_price = check_exit_conditions(
-                    position_for_exit, 
-                    df, 
-                    highest
-                )
+                position_for_exit = {"entry": pos["entry"], "sl": pos.get("sl"), "tp": pos.get("tp"), "entry_time": entry_time}
+                exit_signal, exit_price = check_exit_conditions(position_for_exit, df, highest)
                 
                 pos["current_price"] = current_price
                 pos["highest_price"] = highest
                 
                 if exit_signal:
-                    # Hitung PNL
                     pnl = (exit_price - pos["entry"]) * pos.get("position_size", 1)
                     pnl_percent = (exit_price / pos["entry"] - 1) * 100
-                    
-                    # ========== UPDATE KE DATABASE ==========
                     position_id = pos.get("id")
                     if position_id:
                         close_position_in_db(position_id, exit_price, exit_signal, pnl, pnl_percent)
-                    
                     save_signal({
                         'symbol': symbol,
                         'signal': f"EXIT - {exit_signal}",
@@ -1542,19 +1531,14 @@ with tab3:
                     st.success(f"✅ {symbol} closed: {exit_signal} at ${exit_price:.4f}")
                 else:
                     updated_positions[symbol] = pos
-                    
-            except Exception as e:
+            except:
                 updated_positions[symbol] = pos
-                print(f"Error updating {symbol}: {e}")
         
-        # Hapus posisi yang sudah exit
         for symbol in positions_to_remove:
             if symbol in st.session_state.positions:
                 del st.session_state.positions[symbol]
-        
         st.session_state.positions = updated_positions
     
-    # ========== TAMPILKAN OPEN POSITIONS ==========
     if st.session_state.positions:
         pos_data = []
         for symbol, pos in st.session_state.positions.items():
@@ -1562,19 +1546,9 @@ with tab3:
                 current_price = pos.get("current_price", pos["entry"])
                 pnl_percent = (current_price / pos['entry'] - 1) * 100
                 pnl = (current_price - pos['entry']) * pos.get("position_size", 1)
-                
-                if pnl > 0:
-                    pnl_color = "🟢"
-                elif pnl < 0:
-                    pnl_color = "🔴"
-                else:
-                    pnl_color = "🟡"
-                
+                pnl_color = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "🟡"
                 entry_time = pos.get("entry_time")
-                if isinstance(entry_time, datetime):
-                    entry_time_str = entry_time.strftime("%Y-%m-%d %H:%M")
-                else:
-                    entry_time_str = str(entry_time)[:16] if entry_time else ""
+                entry_time_str = entry_time.strftime("%Y-%m-%d %H:%M") if isinstance(entry_time, datetime) else str(entry_time)[:16] if entry_time else ""
                 
                 pos_data.append({
                     "Coin": symbol,
@@ -1586,51 +1560,39 @@ with tab3:
                     "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
                     "Entry Time": entry_time_str
                 })
-            except Exception as e:
+            except:
                 continue
         
         if pos_data:
             df_pos = pd.DataFrame(pos_data)
             st.dataframe(df_pos, use_container_width=True, hide_index=True)
             
-            # ========== SUMMARY STATISTICS ==========
             st.divider()
             st.subheader("📊 Portfolio Summary")
-            
             total_positions = len(pos_data)
             total_profit = 0
-            winning_positions = 0
-            losing_positions = 0
-            
+            winning = 0
+            losing = 0
             for p in pos_data:
-                pnl_str = p["PNL"].replace("🟢", "").replace("🔴", "").replace("🟡", "").replace("$", "").replace("(", "").replace(")", "").replace("%", "").strip()
                 try:
-                    # Ambil angka pertama sebelum spasi
-                    parts = pnl_str.split()
-                    if parts:
-                        profit = float(parts[0])
-                        total_profit += profit
-                        if profit > 0:
-                            winning_positions += 1
-                        elif profit < 0:
-                            losing_positions += 1
+                    profit = float(p["PNL"].split("$")[1].split(" ")[0])
+                    total_profit += profit
+                    if profit > 0:
+                        winning += 1
+                    elif profit < 0:
+                        losing += 1
                 except:
                     pass
-            
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Total Positions", total_positions)
-            col2.metric("Winning", winning_positions)
-            col3.metric("Losing", losing_positions)
+            col2.metric("Winning", winning)
+            col3.metric("Losing", losing)
             col4.metric("Total PNL", f"${total_profit:.2f}")
     else:
         st.info("📭 Tidak ada posisi terbuka")
     
     st.divider()
-    
-    # ========== CLOSED POSITIONS (DARI DATABASE) ==========
     st.subheader("📊 Closed Positions")
-    
-    # ========== AMBIL DARI DATABASE ==========
     closed_positions = get_closed_positions_from_db(limit=100)
     
     if closed_positions:
@@ -1643,34 +1605,18 @@ with tab3:
             try:
                 pnl = pos.get("pnl", 0)
                 pnl_percent = pos.get("pnl_percent", 0)
-                
+                pnl_color = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "🟡"
                 if pnl > 0:
-                    pnl_color = "🟢"
                     wins += 1
                 elif pnl < 0:
-                    pnl_color = "🔴"
                     losses += 1
-                else:
-                    pnl_color = "🟡"
-                
                 total_profit_closed += pnl
                 
                 exit_reason = pos.get("exit_reason", "UNKNOWN")
                 exit_emoji = "✅" if "TP" in exit_reason else "❌" if "SL" in exit_reason else "🔄"
                 
-                entry_time = pos.get("entry_time", "")
-                if entry_time and isinstance(entry_time, str):
-                    try:
-                        entry_time = datetime.fromisoformat(entry_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
-                    except:
-                        entry_time = entry_time[:16] if len(entry_time) > 16 else entry_time
-                
-                exit_time = pos.get("exit_time", "")
-                if exit_time and isinstance(exit_time, str):
-                    try:
-                        exit_time = datetime.fromisoformat(exit_time.replace('Z', '+00:00')).strftime("%Y-%m-%d %H:%M")
-                    except:
-                        exit_time = exit_time[:16] if len(exit_time) > 16 else exit_time
+                entry_time = pos.get("entry_time", "")[:16] if pos.get("entry_time") else ""
+                exit_time = pos.get("exit_time", "")[:16] if pos.get("exit_time") else ""
                 
                 closed_data.append({
                     "Coin": pos["symbol"],
@@ -1678,22 +1624,19 @@ with tab3:
                     "Exit": format_price(pos.get("exit_price", pos["entry_price"])),
                     "PNL": f"{pnl_color} ${pnl:.2f} ({pnl_percent:.2f}%)",
                     "Exit Reason": f"{exit_emoji} {exit_reason}",
-                    "Entry Time": entry_time,
                     "Exit Time": exit_time
                 })
-            except Exception as e:
+            except:
                 continue
         
         if closed_data:
             df_closed = pd.DataFrame(closed_data)
             st.dataframe(df_closed, use_container_width=True, hide_index=True)
             
-            # ========== CLOSED POSITIONS SUMMARY ==========
             st.divider()
             col1, col2, col3, col4, col5 = st.columns(5)
             total_closed = len(closed_data)
             win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-            
             col1.metric("Total Trades", total_closed)
             col2.metric("Wins", wins)
             col3.metric("Losses", losses)
@@ -1701,27 +1644,28 @@ with tab3:
             col5.metric("Total PNL", f"${total_profit_closed:.2f}")
     else:
         st.info("Belum ada posisi yang ditutup")
-        # ==================== TAB 4: HISTORY ====================
+
+# =========================================================
+# TAB 4: HISTORY
+# =========================================================
 with tab4:
     st.subheader("📜 Signal History")
-    
     history = get_signal_history(limit=200)
     if history:
         df_history = pd.DataFrame(history)
         if 'id' in df_history.columns:
             df_history = df_history.drop('id', axis=1)
         st.dataframe(df_history, use_container_width=True, hide_index=True)
-        
         csv = df_history.to_csv(index=False)
-        st.download_button(label="📥 Download CSV", data=csv,
-                           file_name=f"history_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
+        st.download_button(label="📥 Download CSV", data=csv, file_name=f"history_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
     else:
         st.info("Belum ada sinyal")
 
-# ==================== TAB 5: PERFORMANCE ====================
+# =========================================================
+# TAB 5: PERFORMANCE
+# =========================================================
 with tab5:
     st.subheader("📊 Performance Statistics")
-    
     stats = get_performance()
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Signals", stats.get("total_signals", 0))
@@ -1729,30 +1673,37 @@ with tab5:
     col3.metric("Losses", stats.get("losses", 0))
     col4.metric("Win Rate", f"{stats.get('win_rate', 0):.1f}%")
     
-    # ========== WHIPSAW STATISTICS ==========
     st.divider()
-    st.subheader("📊 Whipsaw Statistics")
-    
+    st.subheader("📊 Bottom Momentum Statistics")
     history = get_signal_history(limit=200)
     if history:
-        whipsaw_count = len([h for h in history if "WHIPSAW" in h.get("signal", "")])
+        bottom_signals = len([h for h in history if "BOTTOM" in h.get("signal", "")])
         total_signals = len(history)
-        whipsaw_percent = (whipsaw_count / total_signals * 100) if total_signals > 0 else 0
-        
+        bottom_rate = (bottom_signals / total_signals * 100) if total_signals > 0 else 0
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Signals", total_signals)
-        col2.metric("Whipsaw Signals", whipsaw_count)
-        col3.metric("Whipsaw Rate", f"{whipsaw_percent:.1f}%")
-    # =========================================
+        col2.metric("Bottom Signals", bottom_signals)
+        col3.metric("Bottom Rate", f"{bottom_rate:.1f}%")
     
     st.divider()
-    st.subheader("📈 SPOT Trading Rules Summary")
+    st.subheader("📈 Trading Rules Summary")
     rules = {
-        "BUY ⭐⭐⭐⭐⭐": "MACD histogram > 0, DIF > DEA, Stoch RSI 10-30, Golden Cross, EMA100+",
-        "BUY ⭐⭐⭐⭐": "MACD DIF > DEA, Stoch 20-40 & mengarah naik, bullish trend",
-        "HOLD ⭐⭐⭐⭐": "MACD masih naik, Stoch RSI 30-70",
-        "EXIT ⭐⭐⭐⭐": "Stoch RSI >85, Histogram mulai mengecil, MACD death cross",
-        "STOP LOSS": "Harga turun 3x ATR dari entry"
+        "🔥 STRONG BOTTOM MOMENTUM": "Bottom Score ≥ 5, Momentum Score ≥ 5 → BELI!",
+        "🟢 BOTTOM MOMENTUM": "Bottom Score ≥ 4, Momentum Score ≥ 4 → AKUMULASI",
+        "🟡 POTENTIAL BOTTOM": "Bottom Score ≥ 3, Momentum Score ≥ 3 → PANTAU",
+        "🔴 EXIT": "Stoch RSI >85, Histogram mengecil, MACD death cross",
+        "⛔ STOP LOSS": "Harga turun 3x ATR dari entry"
     }
     for rule, desc in rules.items():
         st.write(f"**{rule}:** {desc}")
+
+# =========================================================
+# FOOTER
+# =========================================================
+st.divider()
+st.caption(f"""
+🔄 Data dari Yahoo Finance | Timeframe: 15M, 1H, 4H  
+📊 Indikator: MACD + Stoch RSI + EMA20/50/100 + Bottom Detection + Momentum Score  
+💾 Database: Supabase PostgreSQL  
+📌 Mode: Bottom Momentum Scanner - BELI DARI BAWAH
+""")
